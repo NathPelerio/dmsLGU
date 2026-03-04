@@ -1,0 +1,11 @@
+{
+    "name": "dmslgu/app",
+    "config": {"cafile": "C:/laragon/www/dmsLGU/ssl/cacert.pem"},
+    "require": {
+        "php": ">=7.4",
+        "mongodb/mongodb": "^1.17"
+    },
+    "autoload": {
+        "files": []
+    }
+}
