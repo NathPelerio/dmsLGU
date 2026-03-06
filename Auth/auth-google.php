@@ -25,6 +25,7 @@ $scheme = $isHttps ? 'https' : 'http';
 $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
 $script = $_SERVER['SCRIPT_NAME'] ?? '/Auth/auth-google.php';
 $redirectUri = $scheme . '://' . $host . $script;
+$baseAuthUrl = $scheme . '://' . $host . rtrim(str_replace('\\', '/', dirname($script)), '/');
 
 function redirectByRole($role) {
     if ($role === 'superadmin') {
@@ -56,6 +57,43 @@ function sendOtpEmail($toEmail, $otp, $config, $displayName = '') {
         . "DMS LGU Solano";
 
     return sendEmailViaSmtp($toEmail, $subject, $message, $config);
+}
+
+function sendTrustedLoginConfirmationEmail($toEmail, $confirmUrl, $denyUrl, $config, $displayName = '', $expiryMinutes = 10) {
+    $expiryMinutes = max(1, (int)$expiryMinutes);
+    $subject = 'DMS LGU Solano - Confirm your sign-in';
+    $nameLine = trim($displayName) !== '' ? trim($displayName) : 'User';
+    $plainMessage = "Good day, {$nameLine}.\n\n"
+        . "We noticed a sign-in attempt to your DMS LGU Solano account from a remembered device.\n"
+        . "Please confirm this login by opening this link:\n"
+        . $confirmUrl . "\n\n"
+        . "If this was not you, secure your account by opening this link:\n"
+        . $denyUrl . "\n\n"
+        . "This confirmation link expires in {$expiryMinutes} minute(s).\n"
+        . "If you are unsure, contact your system administrator immediately.\n\n"
+        . "Regards,\n"
+        . "DMS LGU Solano";
+    $safeName = htmlspecialchars($nameLine, ENT_QUOTES, 'UTF-8');
+    $safeConfirmUrl = htmlspecialchars($confirmUrl, ENT_QUOTES, 'UTF-8');
+    $safeDenyUrl = htmlspecialchars($denyUrl, ENT_QUOTES, 'UTF-8');
+    $buttonBaseStyle = 'display:inline-block;min-width:220px;padding:12px 18px;text-decoration:none;border-radius:12px;font-weight:700;text-align:center;font-family:Arial,sans-serif;';
+    $confirmStyle = $buttonBaseStyle . 'background:#ffd400;color:#0b2545;border:1px solid #eab308;';
+    $denyStyle = $buttonBaseStyle . 'background:#0b2545;color:#ffd400;border:1px solid #ffd400;';
+    $htmlMessage = '<div style="font-family:Arial,sans-serif;line-height:1.5;color:#0f172a;">'
+        . '<p>Good day, ' . $safeName . '.</p>'
+        . '<p>We noticed a sign-in attempt to your DMS LGU Solano account from a remembered device.</p>'
+        . '<div style="text-align:center;margin:20px 0;">'
+        . '<a href="' . $safeConfirmUrl . '" style="' . $confirmStyle . '">Confirm Login</a>'
+        . '</div>'
+        . '<div style="text-align:center;margin:20px 0;">'
+        . '<a href="' . $safeDenyUrl . '" style="' . $denyStyle . '">This wasn\'t me</a>'
+        . '</div>'
+        . '<p>This confirmation link expires in ' . (int)$expiryMinutes . ' minute(s).</p>'
+        . '<p>If you are unsure, contact your system administrator immediately.</p>'
+        . '<p>Regards,<br>DMS LGU Solano</p>'
+        . '</div>';
+
+    return sendEmailViaSmtp($toEmail, $subject, $plainMessage, $config, $htmlMessage);
 }
 
 function getAccountRestrictionMeta($user) {
@@ -225,24 +263,52 @@ try {
 
     $trustedDeviceOk = authTrustedConsume($config, (string)($user['id'] ?? ''));
     if ($trustedDeviceOk) {
-        $_SESSION['user_id'] = (string)($user['id'] ?? '');
-        $_SESSION['user_email'] = $user['email'] ?? $email;
-        $_SESSION['user_name'] = $user['name'] ?? $name;
-        $_SESSION['user_username'] = $user['username'] ?? '';
-        $_SESSION['user_role'] = $user['role'] ?? 'user';
-        $_SESSION['user_photo'] = $user['photo'] ?? $picture;
-        $_SESSION['user_signature'] = $user['signature'] ?? '';
-        activityLog($config, 'login_success', [
+        $confirmPayload = authTrustedConfirmCreate($config, (string)($user['id'] ?? ''), 10);
+        if (!is_array($confirmPayload)) {
+            header('Location: ../index.php?error=google_trusted_confirm_send_failed');
+            exit;
+        }
+        $tokenBaseUrl = $baseAuthUrl . '/verify-trusted-login.php?uid='
+            . urlencode((string)($user['id'] ?? ''))
+            . '&selector=' . urlencode((string)$confirmPayload['selector'])
+            . '&token=' . urlencode((string)$confirmPayload['token']);
+        $confirmUrl = $tokenBaseUrl . '&action=allow';
+        $denyUrl = $tokenBaseUrl . '&action=deny';
+        $confirmName = trim((string)($user['name'] ?? ''));
+        if ($confirmName === '') {
+            $confirmName = trim((string)($user['username'] ?? ''));
+        }
+        if ($confirmName === '') {
+            $confirmName = $email;
+        }
+        if (!sendTrustedLoginConfirmationEmail($email, $confirmUrl, $denyUrl, $config, $confirmName, 10)) {
+            header('Location: ../index.php?error=google_trusted_confirm_send_failed');
+            exit;
+        }
+
+        $_SESSION['google_trusted_pending_user'] = [
+            'user_id' => (string)($user['id'] ?? ''),
+            'user_email' => $user['email'] ?? $email,
+            'user_name' => $user['name'] ?? $name,
+            'user_username' => $user['username'] ?? '',
+            'user_role' => $user['role'] ?? 'user',
+            'user_photo' => $user['photo'] ?? $picture,
+            'user_signature' => $user['signature'] ?? '',
+        ];
+        $_SESSION['google_trusted_pending_selector'] = (string)$confirmPayload['selector'];
+        activityLog($config, 'login_challenge_sent', [
             'module' => 'auth',
             'login_type' => 'google_sso_trusted_device',
-            'role' => (string)($_SESSION['user_role'] ?? ''),
+            'challenge' => 'email_confirmation_link',
+            'target_email' => $email,
         ], 'success', [
-            'id' => (string)($_SESSION['user_id'] ?? ''),
-            'email' => (string)($_SESSION['user_email'] ?? ''),
-            'name' => (string)($_SESSION['user_name'] ?? ''),
-            'role' => (string)($_SESSION['user_role'] ?? ''),
+            'id' => (string)($user['id'] ?? ''),
+            'email' => $email,
+            'name' => $confirmName,
+            'role' => (string)($user['role'] ?? 'user'),
         ]);
-        redirectByRole($_SESSION['user_role'] ?? 'user');
+        header('Location: verify-trusted-login.php');
+        exit;
     }
 
     $otp = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);

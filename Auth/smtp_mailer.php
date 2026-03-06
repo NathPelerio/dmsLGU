@@ -26,7 +26,7 @@ function smtpCommand($socket, $command, $okPrefixes = ['2', '3']) {
     return in_array($first, $okPrefixes, true);
 }
 
-function sendEmailViaSmtp($toEmail, $subject, $plainBody, $config) {
+function sendEmailViaSmtp($toEmail, $subject, $plainBody, $config, $htmlBody = '') {
     $host = trim($config['smtp_host'] ?? '');
     $port = (int)($config['smtp_port'] ?? 465);
     $username = trim($config['smtp_username'] ?? '');
@@ -91,11 +91,17 @@ function sendEmailViaSmtp($toEmail, $subject, $plainBody, $config) {
     $headers[] = 'To: <' . $toEmail . '>';
     $headers[] = 'Subject: ' . $safeSubject;
     $headers[] = 'MIME-Version: 1.0';
-    $headers[] = 'Content-Type: text/plain; charset=UTF-8';
+    $isHtml = trim((string)$htmlBody) !== '';
+    if ($isHtml) {
+        $headers[] = 'Content-Type: text/html; charset=UTF-8';
+    } else {
+        $headers[] = 'Content-Type: text/plain; charset=UTF-8';
+    }
     $headers[] = 'Content-Transfer-Encoding: 8bit';
 
     // Dot-stuffing per SMTP spec.
-    $body = preg_replace('/^\./m', '..', $plainBody);
+    $payload = $isHtml ? (string)$htmlBody : (string)$plainBody;
+    $body = preg_replace('/^\./m', '..', $payload);
     $message = implode("\r\n", $headers) . "\r\n\r\n" . $body . "\r\n.";
     if (!smtpCommand($socket, $message)) {
         fclose($socket);
