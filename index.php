@@ -62,6 +62,7 @@ if (isset($_GET['error'])) {
         'google_no_email'        => 'Your Google account did not provide an email.',
         'google_not_authorized'  => 'This email is not authorized. Your account must exist in the system. Contact your administrator.',
         'google_otp_send_failed' => 'Google sign-in was verified, but we could not send your OTP email. Please check mail settings and try again.',
+        'google_trusted_confirm_send_failed' => 'Google sign-in was verified, but we could not send the trusted-device confirmation email. Please try again.',
         'google_create_failed'   => 'Could not create your account. Please try again.',
         'google_login_failed'    => 'Login failed. Please try again.',
         'google_account_disabled' => 'Your account is disabled.',

@@ -386,7 +386,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (!isset($_POST['action']) || $_POST
             <input type="text" id="otp" name="otp" maxlength="6" inputmode="numeric" pattern="\d{6}" placeholder="000000" required>
             <div class="remember-wrap">
                 <input type="checkbox" id="remember_device" name="remember_device" value="1" checked>
-                <label for="remember_device">Remember this device for 30 days</label>
+                <label for="remember_device">Remember me on this device (30 days)</label>
             </div>
             <div class="actions">
                 <button type="submit" class="btn-primary">Verify and Continue</button>

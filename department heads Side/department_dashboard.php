@@ -1,248 +1,305 @@
 <?php
 session_start();
 
-$userRole = $_SESSION['user_role'] ?? '';
+$role = (string)($_SESSION['user_role'] ?? '');
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../index.php');
     exit;
 }
-if ($userRole === 'admin') {
-    header('Location: ../Admin%20Side/admin_dashboard.php');
-    exit;
-}
-if ($userRole === 'superadmin') {
+if ($role === 'superadmin') {
     header('Location: ../Super%20Admin%20Side/dashboard.php');
     exit;
 }
-if (in_array($userRole, ['staff', 'user'])) {
+if ($role === 'admin') {
+    header('Location: ../Admin%20Side/admin_dashboard.php');
+    exit;
+}
+if (in_array($role, ['staff', 'user'], true)) {
     header('Location: ../Front%20Desk%20Side/staff_dashboard.php');
     exit;
 }
+if (!in_array($role, ['departmenthead', 'department_head', 'dept_head'], true)) {
+    header('Location: ../index.php');
+    exit;
+}
+
+require_once __DIR__ . '/../Super Admin Side/_account_helpers.php';
+
+$config = require dirname(__DIR__) . '/config.php';
+require_once __DIR__ . '/../Super Admin Side/_notifications_super_admin.php';
+$notifData = getSuperAdminNotifications($config);
+$notifCount = $notifData['count'];
+$notifItems = $notifData['items'];
 
 $userName = $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'Department Head';
+$userRole = 'Department Head';
+$userInitial = mb_strtoupper(mb_substr($userName, 0, 1));
+$sidebar_active = 'dashboard';
+$welcomeUsername = getUserUsername($_SESSION['user_id'] ?? '') ?: ($_SESSION['user_username'] ?? $userName) ?: 'Department Head';
+
+$totalDocuments = 0;
+$pendingCount = 0;
+$approvedCount = 0;
+$completedCount = 0;
+$recentDocuments = [];
+$statusBreakdown = ['Archived' => 0, 'Pending Admin' => 0, 'Pending Department' => 0];
+try {
+    require_once __DIR__ . '/../db.php';
+    $pdo = dbPdo($config);
+    $stmt = $pdo->query('SELECT * FROM documents ORDER BY created_at DESC LIMIT 200');
+    $docs = $stmt->fetchAll();
+    $totalDocuments = count($docs);
+    foreach ($docs as $d) {
+        $arr = $d;
+        $status = isset($arr['status']) ? (string)$arr['status'] : 'Pending';
+        $s = strtolower($status);
+        if (strpos($s, 'pending') !== false) $pendingCount++;
+        elseif (strpos($s, 'approved') !== false) $approvedCount++;
+        elseif (strpos($s, 'completed') !== false) $completedCount++;
+        if (strpos($s, 'archived') !== false) {
+            $statusBreakdown['Archived']++;
+        } elseif (strpos($s, 'admin') !== false) {
+            $statusBreakdown['Pending Admin']++;
+        } else {
+            $statusBreakdown['Pending Department']++;
+        }
+    }
+    $recentDocuments = array_slice($docs, 0, 5);
+} catch (Exception $e) {
+    $totalDocuments = 0;
+    $pendingCount = 0;
+    $approvedCount = 0;
+    $completedCount = 0;
+    $statusBreakdown = ['Archived' => 0, 'Pending Admin' => 0, 'Pending Department' => 0];
+    $recentDocuments = [];
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <title>DMS LGU - Department Head Dashboard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Department Head – Department Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="../Super%20Admin%20Side/styles.css">
     <link rel="stylesheet" href="../Admin%20Side/admin-dashboard.css">
+    <link rel="stylesheet" href="../Super%20Admin%20Side/sidebar_super_admin.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        body, .dashboard-container, .main-content {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Open Sans', sans-serif;
+        }
+        body { margin: 0; background: #f8fafc; color: #0f172a; }
+        .main-content { display: flex; flex-direction: column; background: #fff; min-height: 0; flex: 1; }
+        .main-content .admin-content-header-row { flex-shrink: 0; }
+        .main-content .admin-content-body { flex: 1; min-height: 0; overflow: auto; padding: 32px 35px; }
+        .main-content .admin-content-header-row { padding-right: 35.2px; }
+        .main-content .admin-content-actions { margin-left: auto; }
+        .admin-content-actions .header-controls { position: relative; }
+        .admin-content-actions .icon-btn {
+            background: #f1f5f9;
+            border: none;
+            color: #475569;
+            padding: 0;
+            border-radius: 10px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 44px;
+            height: 44px;
+        }
+        .admin-content-actions .icon-btn:hover { background: #e2e8f0; color: #1e293b; }
+        .admin-content-actions .icon-btn svg { width: 22px; height: 22px; }
+        .admin-content-actions .notif-badge {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            background: #ef4444;
+            color: #fff;
+            font-size: 12px;
+            line-height: 1;
+            padding: 4px 7px;
+            border-radius: 999px;
+        }
+    </style>
 </head>
-<body class="admin-dashboard">
-    <div class="admin-body">
-        <aside class="admin-sidebar">
-            <div class="sidebar-header">
-                <div class="sidebar-logo">
-                    <img src="../img/logo.png" alt="Municipal Logo">
-                </div>
-                <div class="sidebar-title">
-                    <h2>LGU SOLANO<br><span>DEPARTMENT DASHBOARD</span></h2>
-                </div>
-            </div>
-            <nav class="sidebar-nav">
-                <a href="department_dashboard.php" class="sidebar-link active" data-section="home">
-                    <svg class="sidebar-link-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
-                    Home
-                </a>
-            </nav>
-        </aside>
+<body>
+    <div class="dashboard-container">
+        <?php include __DIR__ . '/_sidebar_department_head.php'; ?>
 
-        <main class="admin-main" style="background:#fff;">
-            <div class="admin-content" id="admin-content" style="background:#fff; color:#1e293b;">
+        <div class="main-content">
+            <div class="admin-content" id="admin-content">
                 <div class="admin-content-header-row">
                     <header class="admin-content-header">
-                        <div class="admin-header-icon">
-                            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                            </svg>
-                        </div>
                         <div class="admin-header-text">
-                            <h1 class="admin-content-title" id="admin-content-title">Department Dashboard</h1>
-                            <p class="admin-content-subtitle">Welcome to the department head control panel for managing documents and operations</p>
+                            <h1 class="admin-content-title">Welcome back, <?php echo htmlspecialchars($welcomeUsername); ?></h1>
+                            <p class="admin-content-subtitle" id="dashboard-subtitle">Department Head Dashboard - </p>
                         </div>
                     </header>
-                    <div class="admin-content-icons">
-                        <button type="button" class="admin-icon-btn" id="notif-btn" title="Notifications" aria-label="Notifications">
-                            <svg class="icon-bell" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-                        </button>
-                        <div class="admin-profile-wrap">
-                            <button type="button" class="admin-icon-btn" id="profile-logout-btn" title="Profile and log out" aria-haspopup="true" aria-expanded="false" aria-label="Profile">
-                                <svg class="icon-person" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 0 0-16 0"/></svg>
-                            </button>
-                            <div class="profile-dropdown" id="profile-dropdown" hidden>
-                                <a href="#" class="dropdown-item">Profile</a>
-                                <a href="../index.php?logout=1" class="dropdown-item dropdown-logout">Log out</a>
+                    <div class="admin-content-actions">
+                        <div class="header-controls">
+                            <?php include __DIR__ . '/_notif_dropdown_department_head.php'; ?>
+                        </div>
+                    </div>
+                </div>
+                <div class="admin-content-body" id="admin-content-body">
+                    <div class="dashboard-upload-row">
+                        <a href="../Admin%20Side/documents.php" class="btn-upload-document">
+                            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                            Upload Document
+                        </a>
+                    </div>
+                    <div class="dashboard-metrics">
+                        <div class="metric-card">
+                            <span class="metric-label">TOTAL DOCUMENTS</span>
+                            <span class="metric-value"><?php echo (int)$totalDocuments; ?></span>
+                            <svg class="metric-icon metric-icon-doc" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+                        </div>
+                        <div class="metric-card">
+                            <span class="metric-label">PENDING</span>
+                            <span class="metric-value"><?php echo (int)$pendingCount; ?></span>
+                            <svg class="metric-icon metric-icon-pending" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        </div>
+                        <div class="metric-card">
+                            <span class="metric-label">APPROVED</span>
+                            <span class="metric-value"><?php echo (int)$approvedCount; ?></span>
+                            <svg class="metric-icon metric-icon-approved" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                        </div>
+                        <div class="metric-card">
+                            <span class="metric-label">COMPLETED</span>
+                            <span class="metric-value"><?php echo (int)$completedCount; ?></span>
+                            <svg class="metric-icon metric-icon-completed" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-middle">
+                        <div class="dashboard-card my-tasks-card">
+                            <div class="card-head">
+                                <h3 class="card-title">My Tasks</h3>
+                                <a href="../Admin%20Side/documents.php" class="card-link">View All -></a>
+                            </div>
+                            <div class="my-tasks-empty">
+                                <svg class="tasks-check-icon" viewBox="0 0 24 24" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                                <p class="tasks-empty-title">All caught up!</p>
+                                <p class="tasks-empty-sub">No pending tasks at the moment</p>
+                            </div>
+                        </div>
+                        <div class="dashboard-card status-breakdown-card">
+                            <h3 class="card-title">Status Breakdown</h3>
+                            <div class="status-chart-wrap">
+                                <canvas id="chart-status-breakdown" width="280" height="280"></canvas>
+                            </div>
+                            <div class="status-legend">
+                                <span class="legend-item"><i class="legend-dot" style="background:#2563eb"></i> Archived</span>
+                                <span class="legend-item"><i class="legend-dot" style="background:#ea580c"></i> Pending Admin</span>
+                                <span class="legend-item"><i class="legend-dot" style="background:#16a34a"></i> Pending Department</span>
                             </div>
                         </div>
                     </div>
-                </div>
-            </div>
-            <div class="admin-content-body" id="admin-content-body">
-                <div class="dashboard-welcome-card">
-                    <div class="dashboard-welcome-header">
-                        <div class="dashboard-welcome-text">
-                            <h2 class="dashboard-welcome-title">Welcome, <?php echo htmlspecialchars($userName); ?>!</h2>
-                            <p class="dashboard-welcome-quote">"Lead with clarity, manage with confidence."</p>
-                        </div>
-                    </div>
-                    <div class="dashboard-datetime" id="dashboard-datetime">Feb 13, 2026, 8:51 AM</div>
-                </div>
 
-                <div class="charts-dashboard" id="charts-dashboard">
-                    <div class="chart-card chart-card-wide">
-                        <h3 class="chart-title">Document volume over time</h3>
-                        <div class="chart-wrap">
-                            <canvas id="chart-trend" width="800" height="320"></canvas>
+                    <div class="dashboard-card recent-docs-card">
+                        <div class="card-head">
+                            <h3 class="card-title">Recent Documents</h3>
+                            <a href="../Admin%20Side/documents.php" class="card-link">View All -></a>
                         </div>
-                    </div>
-                    <div class="chart-card">
-                        <h3 class="chart-title">Documents by status</h3>
-                        <div class="chart-wrap chart-wrap-center">
-                            <canvas id="chart-status" width="320" height="320"></canvas>
-                        </div>
-                    </div>
-                    <div class="chart-card">
-                        <h3 class="chart-title">Documents by office</h3>
-                        <div class="chart-wrap">
-                            <canvas id="chart-offices" width="400" height="280"></canvas>
+                        <div class="recent-docs-table-wrap">
+                            <table class="recent-docs-table">
+                                <thead>
+                                    <tr>
+                                        <th>CONTROL NO.</th>
+                                        <th>TITLE</th>
+                                        <th>STATUS</th>
+                                        <th>DATE</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php if (empty($recentDocuments)): ?>
+                                    <tr>
+                                        <td colspan="4" class="recent-docs-empty">No recent documents</td>
+                                    </tr>
+                                    <?php else: ?>
+                                    <?php foreach ($recentDocuments as $doc): ?>
+                                    <?php
+                                        $controlNo = isset($doc['controlNo']) ? htmlspecialchars($doc['controlNo']) : (isset($doc['control_no']) ? htmlspecialchars($doc['control_no']) : '-');
+                                        $title = isset($doc['title']) ? htmlspecialchars($doc['title']) : (isset($doc['subject']) ? htmlspecialchars($doc['subject']) : '-');
+                                        $status = isset($doc['status']) ? htmlspecialchars($doc['status']) : 'Pending';
+                                        $date = '-';
+                                        if (isset($doc['createdAt'])) {
+                                            $dt = $doc['createdAt'];
+                                            if ($dt instanceof DateTimeInterface) {
+                                                $date = $dt->format('M j, Y');
+                                            } elseif (is_string($dt)) {
+                                                $date = date('M j, Y', strtotime($dt));
+                                            }
+                                        }
+                                    ?>
+                                    <tr>
+                                        <td><a href="../Admin%20Side/documents.php" class="control-no-link"><?php echo $controlNo; ?></a></td>
+                                        <td><?php echo $title; ?></td>
+                                        <td><span class="status-badge status-pending"><?php echo $status; ?></span></td>
+                                        <td><?php echo $date; ?></td>
+                                    </tr>
+                                    <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
             </div>
-        </main>
+        </div>
     </div>
 
+    <script src="../Super%20Admin%20Side/sidebar_super_admin.js"></script>
+    <script src="department_notifications.js"></script>
     <script>
     (function() {
-        function updateDateTime() {
-            var el = document.getElementById('dashboard-datetime');
+        function updateSubtitle() {
+            var el = document.getElementById('dashboard-subtitle');
             if (el) {
                 var now = new Date();
-                el.textContent = now.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+                var day = now.toLocaleDateString('en-US', { weekday: 'long' });
+                var date = now.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+                el.textContent = 'Department Head Dashboard - ' + day + ', ' + date;
             }
         }
-        updateDateTime();
-        setInterval(updateDateTime, 60000);
+        updateSubtitle();
+        setInterval(updateSubtitle, 60000);
 
-        var btn = document.getElementById('profile-logout-btn');
-        var dropdown = document.getElementById('profile-dropdown');
-        if (btn && dropdown) {
-            btn.addEventListener('click', function(e) {
-                e.stopPropagation();
-                var open = dropdown.hidden;
-                dropdown.hidden = !open;
-                btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-            });
-            document.addEventListener('click', function() {
-                dropdown.hidden = true;
-                btn.setAttribute('aria-expanded', 'false');
-            });
-            dropdown.addEventListener('click', function(e) { e.stopPropagation(); });
-        }
-
-        var chartInstances = [];
-
-        function renderHomeCharts() {
-            if (typeof Chart === 'undefined') return;
-            var trendCtx = document.getElementById('chart-trend');
-            var statusCtx = document.getElementById('chart-status');
-            var officesCtx = document.getElementById('chart-offices');
-            if (!trendCtx || !statusCtx || !officesCtx) return;
-            chartInstances.forEach(function(c) { if (c && c.destroy) c.destroy(); });
-            chartInstances = [];
-            try {
-                chartInstances.push(new Chart(trendCtx, {
-                    type: 'line',
-                    data: {
-                        labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
-                        datasets: [{
-                            label: 'Documents processed',
-                            data: [42, 58, 51, 72, 65, 88],
-                            borderColor: '#D4AF37',
-                            backgroundColor: 'rgba(212, 175, 55, 0.15)',
-                            borderWidth: 3,
-                            pointBackgroundColor: '#D4AF37',
-                            pointBorderColor: '#fff',
-                            pointBorderWidth: 2,
-                            pointRadius: 5,
-                            pointHoverRadius: 7,
-                            fill: true,
-                            tension: 0.4
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        aspectRatio: 2.5,
-                        plugins: { legend: { display: false } },
-                        scales: {
-                            y: { beginAtZero: true, grid: { color: '#e2e8f0' }, ticks: { color: '#64748b' } },
-                            x: { grid: { display: false }, ticks: { color: '#64748b' } }
+        var statusData = {
+            labels: ['Archived', 'Pending Admin', 'Pending Department'],
+            datasets: [{
+                data: [<?php echo (int)($statusBreakdown['Archived'] ?? 0); ?>, <?php echo (int)($statusBreakdown['Pending Admin'] ?? 0); ?>, <?php echo (int)($statusBreakdown['Pending Department'] ?? 0); ?>],
+                backgroundColor: ['#2563eb', '#ea580c', '#16a34a'],
+                borderWidth: 0,
+                hoverOffset: 4
+            }]
+        };
+        var statusCtx = document.getElementById('chart-status-breakdown');
+        if (statusCtx && typeof Chart !== 'undefined') {
+            new Chart(statusCtx, {
+                type: 'doughnut',
+                data: statusData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    cutout: '60%',
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(ctx) {
+                                    var total = ctx.dataset.data.reduce(function(a, b) { return a + b; }, 0);
+                                    var pct = total ? ((ctx.raw / total) * 100).toFixed(1) : 0;
+                                    return ctx.label + ': ' + ctx.raw + ' (' + pct + '%)';
+                                }
+                            }
                         }
                     }
-                }));
-                chartInstances.push(new Chart(statusCtx, {
-                    type: 'doughnut',
-                    data: {
-                        labels: ['Incoming', 'Outgoing', 'Archived', 'Pending'],
-                        datasets: [{
-                            data: [85, 62, 120, 34],
-                            backgroundColor: ['#0b1f3a', '#D4AF37', '#2563eb', '#64748b'],
-                            borderWidth: 3,
-                            borderColor: '#fff',
-                            hoverBorderWidth: 4
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        aspectRatio: 1,
-                        plugins: {
-                            legend: { position: 'bottom', labels: { padding: 12, usePointStyle: true, color: '#1e293b' } }
-                        },
-                        cutout: '65%'
-                    }
-                }));
-                chartInstances.push(new Chart(officesCtx, {
-                    type: 'bar',
-                    data: {
-                        labels: ['Mayor', 'Treasury', 'Planning', 'Health', 'Engineering'],
-                        datasets: [{
-                            label: 'Documents',
-                            data: [45, 38, 52, 28, 41],
-                            backgroundColor: function(context) {
-                                var max = Math.max(...context.dataset.data);
-                                var value = context.dataset.data[context.dataIndex];
-                                return value === max ? '#D4AF37' : '#0b1f3a';
-                            },
-                            borderRadius: 8,
-                            borderSkipped: false
-                        }]
-                    },
-                    options: {
-                        indexAxis: 'y',
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        aspectRatio: 1.2,
-                        plugins: { legend: { display: false } },
-                        scales: {
-                            x: { beginAtZero: true, grid: { color: '#e2e8f0' }, ticks: { color: '#64748b' } },
-                            y: { grid: { display: false }, ticks: { color: '#64748b' } }
-                        }
-                    }
-                }));
-            } catch (error) { console.error('Error rendering charts:', error); }
+                }
+            });
         }
-
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', function() { setTimeout(renderHomeCharts, 500); });
-        } else {
-            setTimeout(renderHomeCharts, 500);
-        }
-        window.addEventListener('load', function() { setTimeout(renderHomeCharts, 300); });
     })();
     </script>
 </body>

@@ -68,6 +68,41 @@ if (!empty($_GET['download']) && preg_match('/^[a-f0-9]{24}$/i', $_GET['download
     exit;
 }
 
+// Fetch exact saved stamp config for a sent record.
+if (isset($_GET['stamp_for_sent'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    $sentRecordId = trim((string)($_GET['stamp_for_sent'] ?? ''));
+    if ($sentRecordId === '' || !ctype_digit($sentRecordId)) {
+        echo json_encode(['ok' => false]);
+        exit;
+    }
+    try {
+        $pdo = dbPdo($config);
+        $stmt = $pdo->prepare(
+            'SELECT stamp_image, stamp_width_pct, stamp_x_pct, stamp_y_pct
+             FROM sent_to_super_admin
+             WHERE id = :id
+             LIMIT 1'
+        );
+        $stmt->execute([':id' => (int)$sentRecordId]);
+        $row = $stmt->fetch();
+        if ($row) {
+            echo json_encode([
+                'ok' => true,
+                'image' => (string)($row['stamp_image'] ?? ''),
+                'width' => (string)($row['stamp_width_pct'] ?? ''),
+                'x' => (string)($row['stamp_x_pct'] ?? ''),
+                'y' => (string)($row['stamp_y_pct'] ?? ''),
+            ]);
+            exit;
+        }
+    } catch (Exception $e) {
+        // Fall through to not-found response.
+    }
+    echo json_encode(['ok' => false]);
+    exit;
+}
+
 // Send document to Admin Side with per-document stamp placement.
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'send_to_admin') {
     $sendId = trim((string)($_POST['document_id'] ?? ''));
@@ -244,7 +279,9 @@ $endorsementDepartments = [];
 try {
     $pdo = dbPdo($config);
     // Load every sent record (one row per send – no deduplication by documentId)
-    $stmt = $pdo->query('SELECT * FROM sent_to_super_admin ORDER BY sent_at DESC LIMIT 500');
+    // Deterministic ordering: when multiple sends share the same second,
+    // always keep the latest inserted row first.
+    $stmt = $pdo->query('SELECT * FROM sent_to_super_admin ORDER BY sent_at DESC, id DESC LIMIT 500');
     foreach ($stmt as $arr) {
         $arr['documentId'] = (string)($arr['document_id'] ?? '');
         $arr['sentRecordId'] = (string)($arr['id'] ?? uniqid('sent-', true));
@@ -471,12 +508,12 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
                                     <td><?= (int)($idx + 1) ?></td>
                                     <td><?= htmlspecialchars($sent['documentCode'] ?? '—') ?></td>
                                     <td><?= htmlspecialchars($sent['documentTitle'] ?? '—') ?></td>
-                                    <td><a href="documents.php?view=<?= urlencode($docId) ?>" class="doc-file-link document-view-trigger" data-doc-id="<?= htmlspecialchars($docId) ?>" data-doc-name="<?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?>" data-stamp-image="<?= htmlspecialchars((string)($sent['stamp_image'] ?? '')) ?>" data-stamp-width="<?= htmlspecialchars((string)($sent['stamp_width_pct'] ?? '18')) ?>" data-stamp-x="<?= htmlspecialchars((string)($sent['stamp_x_pct'] ?? '82')) ?>" data-stamp-y="<?= htmlspecialchars((string)($sent['stamp_y_pct'] ?? '84')) ?>"><?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?></a></td>
+                                    <td><a href="documents.php?view=<?= urlencode($docId) ?>" class="doc-file-link document-view-trigger" data-doc-id="<?= htmlspecialchars($docId) ?>" data-doc-name="<?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?>" data-sent-record-id="<?= htmlspecialchars((string)($sent['sentRecordId'] ?? '')) ?>" data-stamp-image="<?= htmlspecialchars((string)($sent['stamp_image'] ?? '')) ?>" data-stamp-width="<?= htmlspecialchars((string)($sent['stamp_width_pct'] ?? '18')) ?>" data-stamp-x="<?= htmlspecialchars((string)($sent['stamp_x_pct'] ?? '82')) ?>" data-stamp-y="<?= htmlspecialchars((string)($sent['stamp_y_pct'] ?? '84')) ?>"><?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?></a></td>
                                     <td><span class="document-status document-status-<?= strtolower(htmlspecialchars($sentStatus)) ?>"><?= htmlspecialchars($sentStatus) ?></span></td>
                                     <td><?= htmlspecialchars($sent['sentAtFormatted'] ?? '—') ?></td>
                                     <td>
                                         <div class="documents-actions-row">
-                                            <a href="documents.php?view=<?= urlencode($docId) ?>" class="documents-action-btn documents-action-open document-view-trigger" data-doc-id="<?= htmlspecialchars($docId) ?>" data-doc-name="<?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?>" data-stamp-image="<?= htmlspecialchars((string)($sent['stamp_image'] ?? '')) ?>" data-stamp-width="<?= htmlspecialchars((string)($sent['stamp_width_pct'] ?? '18')) ?>" data-stamp-x="<?= htmlspecialchars((string)($sent['stamp_x_pct'] ?? '82')) ?>" data-stamp-y="<?= htmlspecialchars((string)($sent['stamp_y_pct'] ?? '84')) ?>" title="View document"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>View</a>
+                                            <a href="documents.php?view=<?= urlencode($docId) ?>" class="documents-action-btn documents-action-open document-view-trigger" data-doc-id="<?= htmlspecialchars($docId) ?>" data-doc-name="<?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?>" data-sent-record-id="<?= htmlspecialchars((string)($sent['sentRecordId'] ?? '')) ?>" data-stamp-image="<?= htmlspecialchars((string)($sent['stamp_image'] ?? '')) ?>" data-stamp-width="<?= htmlspecialchars((string)($sent['stamp_width_pct'] ?? '18')) ?>" data-stamp-x="<?= htmlspecialchars((string)($sent['stamp_x_pct'] ?? '82')) ?>" data-stamp-y="<?= htmlspecialchars((string)($sent['stamp_y_pct'] ?? '84')) ?>" title="View document"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>View</a>
                                             <button type="button" class="documents-action-btn documents-action-send send-admin-trigger" data-doc-id="<?= htmlspecialchars($docId) ?>" data-doc-name="<?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?>" title="Send to Admin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send to Admin</button>
                                         </div>
                                     </td>
@@ -964,11 +1001,26 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
             return Math.max(min, Math.min(max, value));
         }
 
+        function getStampTargetElement(containerEl) {
+            if (!containerEl) return null;
+            // Keep one coordinate system across sender/receiver views.
+            // Anchor to the rendered DOCX page itself to avoid wrapper padding drift.
+            var page = containerEl.querySelector('.docx');
+            if (!page) page = containerEl.querySelector('.docx-wrapper');
+            if (!page) page = containerEl.firstElementChild;
+            if (!page) page = containerEl;
+            if (page && (!page.style.position || page.style.position === 'static')) {
+                page.style.position = 'relative';
+            }
+            return page;
+        }
+
         function getSendStampBounds() {
-            if (!sendStampNode || !sendAdminContainer) {
+            var targetEl = getStampTargetElement(sendAdminContainer);
+            if (!sendStampNode || !targetEl) {
                 return { minX: 5, maxX: 95, minY: 5, maxY: 95 };
             }
-            var rect = sendAdminContainer.getBoundingClientRect();
+            var rect = targetEl.getBoundingClientRect();
             if (!rect || rect.width <= 0 || rect.height <= 0) {
                 return { minX: 5, maxX: 95, minY: 5, maxY: 95 };
             }
@@ -1019,12 +1071,16 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
             if (!sendAdminContainer) return null;
             var src = generatedStampData;
             if (!src) return null;
+            var targetEl = getStampTargetElement(sendAdminContainer);
+            if (!targetEl) return null;
             if (!sendStampNode) {
                 sendStampNode = document.createElement('img');
                 sendStampNode.className = 'send-stamp-overlay';
                 sendStampNode.alt = 'Stamp';
                 sendStampNode.src = src;
-                sendAdminContainer.appendChild(sendStampNode);
+                targetEl.appendChild(sendStampNode);
+            } else if (sendStampNode.parentNode !== targetEl) {
+                targetEl.appendChild(sendStampNode);
             }
             return sendStampNode;
         }
@@ -1152,7 +1208,9 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
             var draggingStamp = false;
             function moveSendStamp(clientX, clientY) {
                 if (!sendStampNode || !sendAdminContainer) return;
-                var rect = sendAdminContainer.getBoundingClientRect();
+                var targetEl = getStampTargetElement(sendAdminContainer);
+                if (!targetEl) return;
+                var rect = targetEl.getBoundingClientRect();
                 if (rect.width <= 0 || rect.height <= 0) return;
                 var bounds = getSendStampBounds();
                 sendStampCfg.x = clamp(((clientX - rect.left) / rect.width) * 100, bounds.minX, bounds.maxX);
@@ -1235,17 +1293,23 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
 
         function applyStampOverlay(stampCfg) {
             if (!documentViewContainer || !stampCfg || !stampCfg.image) return;
+            var targetEl = getStampTargetElement(documentViewContainer);
+            if (!targetEl) return;
             var stamp = document.createElement('img');
             stamp.className = 'document-stamp-overlay';
             stamp.src = stampCfg.image;
             stamp.alt = 'Document stamp';
-            var width = Math.max(5, Math.min(60, parseFloat(stampCfg.width) || 18));
-            var x = Math.max(5, Math.min(95, parseFloat(stampCfg.x) || 82));
-            var y = Math.max(5, Math.min(95, parseFloat(stampCfg.y) || 84));
+            // Render exactly what Front Desk saved; do not auto-adjust on view.
+            var width = parseFloat(stampCfg.width);
+            var x = parseFloat(stampCfg.x);
+            var y = parseFloat(stampCfg.y);
+            if (!isFinite(width)) width = 18;
+            if (!isFinite(x)) x = 82;
+            if (!isFinite(y)) y = 84;
             stamp.style.width = width + '%';
             stamp.style.left = x + '%';
             stamp.style.top = y + '%';
-            documentViewContainer.appendChild(stamp);
+            targetEl.appendChild(stamp);
         }
 
         function openDocumentViewModal(docId, docName, stampCfg) {
@@ -1303,13 +1367,38 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
                 e.preventDefault();
                 var docId = el.getAttribute('data-doc-id');
                 var docName = el.getAttribute('data-doc-name') || 'document.docx';
+                var sentRecordId = (el.getAttribute('data-sent-record-id') || '').trim();
                 var stampCfg = {
                     image: el.getAttribute('data-stamp-image') || '',
                     width: el.getAttribute('data-stamp-width') || '18',
                     x: el.getAttribute('data-stamp-x') || '82',
                     y: el.getAttribute('data-stamp-y') || '84'
                 };
-                if (docId) openDocumentViewModal(docId, docName, stampCfg);
+                if (!docId) return;
+                if (/^\d+$/.test(sentRecordId)) {
+                    fetch('documents.php?stamp_for_sent=' + encodeURIComponent(sentRecordId), {
+                        method: 'GET',
+                        credentials: 'same-origin',
+                        cache: 'no-store'
+                    }).then(function(resp) {
+                        return resp.ok ? resp.json() : null;
+                    }).then(function(data) {
+                        if (data && data.ok) {
+                            stampCfg = {
+                                image: data.image || stampCfg.image,
+                                width: data.width || stampCfg.width,
+                                x: data.x || stampCfg.x,
+                                y: data.y || stampCfg.y
+                            };
+                        }
+                    }).catch(function() {
+                        // Fallback to row values if fetch fails.
+                    }).finally(function() {
+                        openDocumentViewModal(docId, docName, stampCfg);
+                    });
+                    return;
+                }
+                openDocumentViewModal(docId, docName, stampCfg);
             });
         });
 

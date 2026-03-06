@@ -79,6 +79,149 @@ function getOffices($search = '') {
 }
 
 /**
+ * Build per-office document flow stats.
+ * - received_by_office: documents routed to each office
+ * - sent_by_head: documents sent by office head accounts
+ * @return array
+ */
+function getOfficeDocumentStats() {
+    try {
+        global $config;
+        $pdo = dbPdo($config);
+        $receivedByOffice = [];
+        $sentByHead = [];
+        $archivedByHead = [];
+        $receivedSendersByOffice = [];
+        $sentRecipientsByHead = [];
+
+        $receivedStmt = $pdo->query(
+            'SELECT office_id, COUNT(*) AS total
+             FROM sent_to_department_heads
+             WHERE office_id IS NOT NULL AND office_id <> ""
+             GROUP BY office_id'
+        );
+        foreach ($receivedStmt as $row) {
+            $officeId = trim((string)($row['office_id'] ?? ''));
+            if ($officeId === '') {
+                continue;
+            }
+            $receivedByOffice[$officeId] = (int)($row['total'] ?? 0);
+        }
+
+        $receivedSendersStmt = $pdo->query(
+            'SELECT office_id, sent_by_user_name, COUNT(*) AS total, MAX(sent_at) AS latest_received_at
+             FROM sent_to_department_heads
+             WHERE office_id IS NOT NULL
+               AND office_id <> ""
+             GROUP BY office_id, sent_by_user_name
+             ORDER BY office_id ASC, total DESC, sent_by_user_name ASC'
+        );
+        foreach ($receivedSendersStmt as $row) {
+            $officeId = trim((string)($row['office_id'] ?? ''));
+            if ($officeId === '') {
+                continue;
+            }
+            $senderName = trim((string)($row['sent_by_user_name'] ?? ''));
+            if ($senderName === '') {
+                $senderName = 'Unknown sender';
+            }
+            if (!isset($receivedSendersByOffice[$officeId])) {
+                $receivedSendersByOffice[$officeId] = [];
+            }
+            $receivedSendersByOffice[$officeId][] = [
+                'name' => $senderName,
+                'count' => (int)($row['total'] ?? 0),
+                'latest_received_at' => (string)($row['latest_received_at'] ?? ''),
+            ];
+        }
+
+        $sentStmt = $pdo->query(
+            'SELECT sent_by_user_id, SUM(total) AS total
+             FROM (
+                 SELECT sent_by_user_id, COUNT(*) AS total
+                 FROM sent_to_super_admin
+                 WHERE sent_by_user_id IS NOT NULL AND sent_by_user_id <> ""
+                 GROUP BY sent_by_user_id
+                 UNION ALL
+                 SELECT sent_by_user_id, COUNT(*) AS total
+                 FROM sent_to_admin
+                 WHERE sent_by_user_id IS NOT NULL AND sent_by_user_id <> ""
+                 GROUP BY sent_by_user_id
+             ) sent_union
+             GROUP BY sent_by_user_id'
+        );
+        foreach ($sentStmt as $row) {
+            $userId = trim((string)($row['sent_by_user_id'] ?? ''));
+            if ($userId === '') {
+                continue;
+            }
+            $sentByHead[$userId] = (int)($row['total'] ?? 0);
+        }
+
+        $sentRecipientsStmt = $pdo->query(
+            'SELECT sent_by_user_id, recipient_label, COUNT(*) AS total, MAX(sent_at) AS latest_sent_at
+             FROM (
+                 SELECT sent_by_user_id, sent_at, "Super Admin" AS recipient_label
+                 FROM sent_to_super_admin
+                 WHERE sent_by_user_id IS NOT NULL AND sent_by_user_id <> ""
+                 UNION ALL
+                 SELECT sent_by_user_id, sent_at, "Admin" AS recipient_label
+                 FROM sent_to_admin
+                 WHERE sent_by_user_id IS NOT NULL AND sent_by_user_id <> ""
+             ) sent_targets
+             GROUP BY sent_by_user_id, recipient_label
+             ORDER BY sent_by_user_id ASC, total DESC, recipient_label ASC'
+        );
+        foreach ($sentRecipientsStmt as $row) {
+            $userId = trim((string)($row['sent_by_user_id'] ?? ''));
+            if ($userId === '') {
+                continue;
+            }
+            if (!isset($sentRecipientsByHead[$userId])) {
+                $sentRecipientsByHead[$userId] = [];
+            }
+            $sentRecipientsByHead[$userId][] = [
+                'name' => (string)($row['recipient_label'] ?? 'Recipient'),
+                'count' => (int)($row['total'] ?? 0),
+                'latest_sent_at' => (string)($row['latest_sent_at'] ?? ''),
+            ];
+        }
+
+        $archivedStmt = $pdo->query(
+            'SELECT user_id, COUNT(*) AS total
+             FROM document_history
+             WHERE user_id IS NOT NULL
+               AND user_id <> ""
+               AND LOWER(TRIM(action)) = "archived"
+             GROUP BY user_id'
+        );
+        foreach ($archivedStmt as $row) {
+            $userId = trim((string)($row['user_id'] ?? ''));
+            if ($userId === '') {
+                continue;
+            }
+            $archivedByHead[$userId] = (int)($row['total'] ?? 0);
+        }
+
+        return [
+            'received_by_office' => $receivedByOffice,
+            'sent_by_head' => $sentByHead,
+            'archived_by_head' => $archivedByHead,
+            'received_senders_by_office' => $receivedSendersByOffice,
+            'sent_recipients_by_head' => $sentRecipientsByHead,
+        ];
+    } catch (Exception $e) {
+        return [
+            'received_by_office' => [],
+            'sent_by_head' => [],
+            'archived_by_head' => [],
+            'received_senders_by_office' => [],
+            'sent_recipients_by_head' => [],
+        ];
+    }
+}
+
+/**
  * Add a new office.
  * @param string $officeCode
  * @param string $officeName
@@ -261,6 +404,26 @@ $search = trim($_GET['search'] ?? '');
 $msg = $_GET['msg'] ?? null;
 $msgOk = isset($_GET['ok']) && $_GET['ok'] === '1';
 $offices = getOffices($search);
+$officeDocStats = getOfficeDocumentStats();
+$receivedSendersByOfficeJson = json_encode($officeDocStats['received_senders_by_office'] ?? [], JSON_UNESCAPED_UNICODE);
+if (!is_string($receivedSendersByOfficeJson)) {
+    $receivedSendersByOfficeJson = '{}';
+}
+$sentRecipientsByOffice = [];
+foreach ($offices as $officeRow) {
+    $officeIdRow = trim((string)($officeRow['_id'] ?? ''));
+    $headIdRow = trim((string)($officeRow['office_head_id'] ?? ''));
+    if ($officeIdRow === '') {
+        continue;
+    }
+    $sentRecipientsByOffice[$officeIdRow] = $headIdRow !== ''
+        ? (array)($officeDocStats['sent_recipients_by_head'][$headIdRow] ?? [])
+        : [];
+}
+$sentRecipientsByOfficeJson = json_encode($sentRecipientsByOffice, JSON_UNESCAPED_UNICODE);
+if (!is_string($sentRecipientsByOfficeJson)) {
+    $sentRecipientsByOfficeJson = '{}';
+}
 $usersList = getUsers();
 $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'] : getUserSignature($_SESSION['user_id'] ?? '');
 
@@ -389,6 +552,10 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .dept-card-head-label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 0.25rem 0; }
         .dept-card-head-value { font-size: 0.9rem; font-weight: 500; color: #0f172a; margin: 0; }
         .dept-card-head-value.not-assigned { color: #94a3b8; font-weight: 500; }
+        .dept-card-flow-stats { margin-top: 0.6rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 0.9rem; row-gap: 0.2rem; }
+        .dept-card-flow-stat { margin: 0; font-size: 0.95rem; color: #475569; }
+        .dept-card-flow-stat strong { color: #1e293b; font-weight: 700; font-size: 1rem; }
+        .view-flow-value { font-size: 1.08rem !important; font-weight: 600; }
         .dept-card-created-section { margin-top: auto; padding-top: 0.75rem; border-top: 1px solid #e5e7eb; }
         .dept-card-created { font-size: 0.75rem; color: #94a3b8; margin: 0; font-family: ui-monospace, 'JetBrains Mono', monospace; }
         .dept-card-menu { position: relative; flex-shrink: 0; }
@@ -436,7 +603,16 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .dept-view-modal-content .offices-field { margin-bottom: 1rem; }
         .dept-view-modal-content .view-label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 0.25rem 0; }
         .dept-view-modal-content .view-value { font-size: 1rem; color: #1e293b; margin: 0 0 0.5rem 0; line-height: 1.4; }
+        .dept-view-modal-content .view-value .flow-clickable { color: #2563eb; text-decoration: underline; background: none; border: none; padding: 0; font: inherit; cursor: pointer; }
+        .dept-view-modal-content .view-value .flow-clickable:hover { color: #1d4ed8; }
         .dept-view-modal-content .view-value.desc { white-space: pre-wrap; }
+        .dept-senders-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+        .dept-senders-item { display: flex; justify-content: space-between; align-items: center; gap: 0.8rem; padding: 0.55rem 0.7rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; }
+        .dept-senders-item-main { min-width: 0; display: grid; gap: 0.12rem; }
+        .dept-senders-item-name { font-size: 0.92rem; color: #1e293b; }
+        .dept-senders-item-time { font-size: 0.8rem; color: #64748b; }
+        .dept-senders-item-count { font-size: 0.85rem; color: #475569; font-weight: 600; }
+        .dept-senders-empty { font-size: 0.9rem; color: #64748b; margin: 0; }
         @media (max-width: 1024px) { .dept-cards-grid { grid-template-columns: repeat(2, 1fr); } }
         @media (max-width: 768px) { .dept-cards-grid { grid-template-columns: 1fr; } .dept-page-header { flex-direction: column; align-items: stretch; } }
     </style>
@@ -497,10 +673,15 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                         $createdTs = dbToTimestamp($createdAt);
                         $createdAt = $createdTs !== null ? date('M j, Y', $createdTs) : '—';
                         $head = trim($o['office_head'] ?? '');
+                        $headId = trim((string)($o['office_head_id'] ?? ''));
+                        $officeId = trim((string)($o['_id'] ?? ''));
                         $desc = trim($o['description'] ?? '');
                         $descDisplay = $desc !== '' ? $desc : 'Municipal department';
+                        $receivedCount = (int)($officeDocStats['received_by_office'][$officeId] ?? 0);
+                        $sentCount = $headId !== '' ? (int)($officeDocStats['sent_by_head'][$headId] ?? 0) : 0;
+                        $archivedCount = $headId !== '' ? (int)($officeDocStats['archived_by_head'][$headId] ?? 0) : 0;
                     ?>
-                    <article class="dept-card dept-card-clickable" data-name="<?= htmlspecialchars($o['office_name'] ?? '') ?>" data-code="<?= htmlspecialchars($o['office_code'] ?? '') ?>" data-desc="<?= htmlspecialchars($descDisplay) ?>" data-head="<?= htmlspecialchars($head !== '' ? $head : 'Not assigned') ?>" data-created="<?= htmlspecialchars($createdAt) ?>" onclick="openViewModalFromCard(this)">
+                    <article class="dept-card dept-card-clickable" data-office-id="<?= htmlspecialchars($officeId) ?>" data-name="<?= htmlspecialchars($o['office_name'] ?? '') ?>" data-code="<?= htmlspecialchars($o['office_code'] ?? '') ?>" data-desc="<?= htmlspecialchars($descDisplay) ?>" data-head="<?= htmlspecialchars($head !== '' ? $head : 'Not assigned') ?>" data-sent="<?= (int)$sentCount ?>" data-received="<?= (int)$receivedCount ?>" data-archived="<?= (int)$archivedCount ?>" data-created="<?= htmlspecialchars($createdAt) ?>" onclick="openViewModalFromCard(this)">
                         <div class="dept-card-header">
                             <div class="dept-card-header-left">
                                 <div class="dept-card-icon">
@@ -527,6 +708,11 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                             <div class="dept-card-head-section">
                                 <p class="dept-card-head-label">Department Head</p>
                                 <p class="dept-card-head-value <?= $head === '' ? 'not-assigned' : '' ?>"><?= $head !== '' ? htmlspecialchars($head) : 'Not assigned' ?></p>
+                                <div class="dept-card-flow-stats">
+                                    <p class="dept-card-flow-stat"><strong>Sent:</strong> <?= (int)$sentCount ?></p>
+                                    <p class="dept-card-flow-stat"><strong>Received:</strong> <?= (int)$receivedCount ?></p>
+                                    <p class="dept-card-flow-stat"><strong>Archived:</strong> <?= (int)$archivedCount ?></p>
+                                </div>
                             </div>
                             <div class="dept-card-created-section">
                                 <p class="dept-card-created">Created: <?= $createdAt ?></p>
@@ -562,11 +748,41 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                         <p class="view-value" id="view-head">—</p>
                     </div>
                     <div class="offices-field">
+                        <p class="view-label">Document Flow</p>
+                        <p class="view-value view-flow-value" id="view-flow-top">Sent: 0 | Received: 0 | Archived: 0</p>
+                    </div>
+                    <div class="offices-field">
                         <p class="view-label">Created</p>
                         <p class="view-value" id="view-created">—</p>
                     </div>
                     <div class="offices-modal-actions">
                         <button type="button" class="offices-btn offices-btn-secondary" onclick="closeViewModal()">Close</button>
+                    </div>
+                </div>
+            </div>
+            <div id="modal-received-senders" class="offices-modal" style="display:none;">
+                <div class="offices-modal-overlay" onclick="closeReceivedSendersModal()"></div>
+                <div class="offices-modal-content dept-view-modal-content">
+                    <button type="button" class="offices-modal-close" onclick="closeReceivedSendersModal()" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg></button>
+                    <h3>Received Document Senders</h3>
+                    <p class="offices-modal-subtitle" id="received-senders-subtitle">Department senders list</p>
+                    <ul class="dept-senders-list" id="received-senders-list"></ul>
+                    <p class="dept-senders-empty" id="received-senders-empty" style="display:none;">No received senders found for this department.</p>
+                    <div class="offices-modal-actions">
+                        <button type="button" class="offices-btn offices-btn-secondary" onclick="closeReceivedSendersModal()">Close</button>
+                    </div>
+                </div>
+            </div>
+            <div id="modal-sent-recipients" class="offices-modal" style="display:none;">
+                <div class="offices-modal-overlay" onclick="closeSentRecipientsModal()"></div>
+                <div class="offices-modal-content dept-view-modal-content">
+                    <button type="button" class="offices-modal-close" onclick="closeSentRecipientsModal()" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg></button>
+                    <h3>Sent Document Recipients</h3>
+                    <p class="offices-modal-subtitle" id="sent-recipients-subtitle">Department recipients list</p>
+                    <ul class="dept-senders-list" id="sent-recipients-list"></ul>
+                    <p class="dept-senders-empty" id="sent-recipients-empty" style="display:none;">No sent recipient records found for this department.</p>
+                    <div class="offices-modal-actions">
+                        <button type="button" class="offices-btn offices-btn-secondary" onclick="closeSentRecipientsModal()">Close</button>
                     </div>
                 </div>
             </div>
@@ -656,6 +872,8 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
             </div>
 
             <script>
+            var receivedSendersByOffice = <?= $receivedSendersByOfficeJson ?>;
+            var sentRecipientsByOffice = <?= $sentRecipientsByOfficeJson ?>;
             (function(){
                 var searchInput = document.querySelector('.dept-search');
                 if (searchInput) {
@@ -671,14 +889,126 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
             function closeAddModal() { document.getElementById('modal-add').style.display = 'none'; }
             function openViewModalFromCard(card) {
                 var d = card.dataset || {};
+                window.__activeViewOfficeId = d.officeId || '';
+                window.__activeViewOfficeName = d.name || 'Department';
                 document.getElementById('view-name').textContent = d.name || '—';
                 document.getElementById('view-code').textContent = d.code || '—';
                 document.getElementById('view-desc').textContent = d.desc || '—';
                 document.getElementById('view-head').textContent = d.head || '—';
+                var sent = Number(d.sent || 0);
+                var received = Number(d.received || 0);
+                var archived = Number(d.archived || 0);
+                document.getElementById('view-flow-top').innerHTML = 'Sent: <button type="button" class="flow-clickable" onclick="openSentRecipientsModal()">' + sent + '</button>'
+                    + ' | Received: <button type="button" class="flow-clickable" onclick="openReceivedSendersModal()">' + received + '</button>'
+                    + ' | Archived: ' + archived;
                 document.getElementById('view-created').textContent = d.created || '—';
                 document.getElementById('modal-view').style.display = 'flex';
             }
             function closeViewModal() { document.getElementById('modal-view').style.display = 'none'; }
+            function formatFlowDateTime(raw, prefix) {
+                if (!raw) return prefix + ': —';
+                var ts = String(raw).trim();
+                var m = ts.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/);
+                if (!m) return prefix + ': ' + ts;
+                var datePart = m[1];
+                var h24 = parseInt(m[2], 10);
+                var min = m[3];
+                var sec = m[4] || '00';
+                var ampm = h24 >= 12 ? 'PM' : 'AM';
+                var h12 = h24 % 12;
+                if (h12 === 0) h12 = 12;
+                var hh = String(h12).padStart(2, '0');
+                return prefix + ': ' + datePart + ' ' + hh + ':' + min + ':' + sec + ' ' + ampm;
+            }
+            function openSentRecipientsModal() {
+                var officeId = window.__activeViewOfficeId || '';
+                var officeName = window.__activeViewOfficeName || 'Department';
+                var subtitle = document.getElementById('sent-recipients-subtitle');
+                var list = document.getElementById('sent-recipients-list');
+                var empty = document.getElementById('sent-recipients-empty');
+                if (subtitle) subtitle.textContent = 'People this department sent documents to: ' + officeName + '.';
+                if (list) list.innerHTML = '';
+                var recipients = (sentRecipientsByOffice && officeId && sentRecipientsByOffice[officeId]) ? sentRecipientsByOffice[officeId] : [];
+                if (!Array.isArray(recipients) || recipients.length === 0) {
+                    if (empty) empty.style.display = '';
+                } else {
+                    if (empty) empty.style.display = 'none';
+                    recipients.forEach(function(item) {
+                        if (!list) return;
+                        var li = document.createElement('li');
+                        li.className = 'dept-senders-item';
+
+                        var main = document.createElement('div');
+                        main.className = 'dept-senders-item-main';
+
+                        var name = document.createElement('span');
+                        name.className = 'dept-senders-item-name';
+                        name.textContent = (item && item.name) ? item.name : 'Recipient';
+
+                        var time = document.createElement('span');
+                        time.className = 'dept-senders-item-time';
+                        time.textContent = formatFlowDateTime(item && item.latest_sent_at ? item.latest_sent_at : '', 'Last sent');
+
+                        main.appendChild(name);
+                        main.appendChild(time);
+
+                        var count = document.createElement('span');
+                        count.className = 'dept-senders-item-count';
+                        var total = Number(item && item.count ? item.count : 0);
+                        count.textContent = total + (total === 1 ? ' document' : ' documents');
+
+                        li.appendChild(main);
+                        li.appendChild(count);
+                        list.appendChild(li);
+                    });
+                }
+                document.getElementById('modal-sent-recipients').style.display = 'flex';
+            }
+            function closeSentRecipientsModal() { document.getElementById('modal-sent-recipients').style.display = 'none'; }
+            function openReceivedSendersModal() {
+                var officeId = window.__activeViewOfficeId || '';
+                var officeName = window.__activeViewOfficeName || 'Department';
+                var subtitle = document.getElementById('received-senders-subtitle');
+                var list = document.getElementById('received-senders-list');
+                var empty = document.getElementById('received-senders-empty');
+                if (subtitle) subtitle.textContent = 'Who sent received documents to ' + officeName + '.';
+                if (list) list.innerHTML = '';
+                var senders = (receivedSendersByOffice && officeId && receivedSendersByOffice[officeId]) ? receivedSendersByOffice[officeId] : [];
+                if (!Array.isArray(senders) || senders.length === 0) {
+                    if (empty) empty.style.display = '';
+                } else {
+                    if (empty) empty.style.display = 'none';
+                    senders.forEach(function(item) {
+                        if (!list) return;
+                        var li = document.createElement('li');
+                        li.className = 'dept-senders-item';
+
+                        var main = document.createElement('div');
+                        main.className = 'dept-senders-item-main';
+
+                        var name = document.createElement('span');
+                        name.className = 'dept-senders-item-name';
+                        name.textContent = (item && item.name) ? item.name : 'Unknown sender';
+
+                        var time = document.createElement('span');
+                        time.className = 'dept-senders-item-time';
+                        time.textContent = formatFlowDateTime(item && item.latest_received_at ? item.latest_received_at : '', 'Received');
+
+                        main.appendChild(name);
+                        main.appendChild(time);
+
+                        var count = document.createElement('span');
+                        count.className = 'dept-senders-item-count';
+                        var total = Number(item && item.count ? item.count : 0);
+                        count.textContent = total + (total === 1 ? ' document' : ' documents');
+                        li.appendChild(main);
+                        li.appendChild(count);
+                        list.appendChild(li);
+                    });
+                }
+                document.getElementById('modal-received-senders').style.display = 'flex';
+            }
+            function closeReceivedSendersModal() { document.getElementById('modal-received-senders').style.display = 'none'; }
             function openEditModal(btn) {
                 var d = btn.dataset || {};
                 document.getElementById('edit-office-id').value = d.id || '';
