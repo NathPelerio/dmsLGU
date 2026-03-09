@@ -26,8 +26,8 @@ if (!in_array($role, ['departmenthead', 'department_head', 'dept_head'], true)) 
 require_once __DIR__ . '/../Super Admin Side/_account_helpers.php';
 
 $config = require dirname(__DIR__) . '/config.php';
-require_once __DIR__ . '/../Super Admin Side/_notifications_super_admin.php';
-$notifData = getSuperAdminNotifications($config);
+require_once __DIR__ . '/_notifications_department_head.php';
+$notifData = getDepartmentHeadNotifications($config);
 $notifCount = $notifData['count'];
 $notifItems = $notifData['items'];
 

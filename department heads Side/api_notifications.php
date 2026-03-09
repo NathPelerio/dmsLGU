@@ -10,7 +10,7 @@ if (!isset($_SESSION['user_id']) || !in_array($role, $allowedRoles, true)) {
 }
 
 $config = require dirname(__DIR__) . '/config.php';
-require_once __DIR__ . '/../Super Admin Side/_notifications_super_admin.php';
+require_once __DIR__ . '/_notifications_department_head.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
@@ -21,18 +21,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
         try {
-            if (!markSuperAdminNotificationRead($config, (int)$notificationId)) {
+            if (!markDepartmentHeadNotificationRead($config, (int)$notificationId)) {
                 throw new RuntimeException('Failed to update notification.');
             }
-            $data = getSuperAdminNotifications($config);
-            echo json_encode(['success' => true, 'count' => (int)($data['count'] ?? 0)]);
+            $data = getDepartmentHeadNotifications($config);
+            echo json_encode([
+                'success' => true,
+                'count' => (int)($data['count'] ?? 0),
+                'items' => $data['items'] ?? [],
+            ]);
             exit;
         } catch (Exception $e) {
             echo json_encode(['success' => false, 'message' => 'Unable to mark notification as read.']);
             exit;
         }
     }
+    if ($action === 'mark_all_read') {
+        try {
+            if (!markAllDepartmentHeadNotificationsRead($config)) {
+                throw new RuntimeException('Failed to update notifications.');
+            }
+            $data = getDepartmentHeadNotifications($config);
+            echo json_encode([
+                'success' => true,
+                'count' => (int)($data['count'] ?? 0),
+                'items' => $data['items'] ?? [],
+            ]);
+            exit;
+        } catch (Exception $e) {
+            echo json_encode(['success' => false, 'message' => 'Unable to mark all notifications as read.']);
+            exit;
+        }
+    }
 }
 
-$data = getSuperAdminNotifications($config);
+$data = getDepartmentHeadNotifications($config);
 echo json_encode($data);

@@ -165,6 +165,23 @@ function sendAddUserOtpEmail($toEmail, $otp, $config, $displayName = '') {
     return sendEmailViaSmtp($toEmail, $subject, $message, $config);
 }
 
+function sendEditUserChangeOtpEmail($toEmail, $otp, $config, $displayName = '') {
+    $expiryMinutes = (int)($config['otp_expiry_minutes'] ?? 5);
+    if ($expiryMinutes <= 0) {
+        $expiryMinutes = 5;
+    }
+    $nameLine = trim($displayName) !== '' ? trim($displayName) : 'User';
+    $subject = 'DMS LGU Solano - Edit User OTP Code';
+    $message = "Good day, {$nameLine}.\n\n"
+        . "A request was made to edit user information in DMS LGU Solano.\n"
+        . "Your one-time verification code is: {$otp}\n\n"
+        . "This code expires in {$expiryMinutes} minute(s).\n"
+        . "If you did not request this, please ignore this message.\n\n"
+        . "Regards,\n"
+        . "DMS LGU Solano";
+    return sendEmailViaSmtp($toEmail, $subject, $message, $config);
+}
+
 /**
  * Disable or suspend a user account.
  * @return array ['success' => bool, 'message' => string]
@@ -278,8 +295,7 @@ $addUserInvalidField = trim((string)($_GET['field'] ?? ''));
 $addUserSuccess = $msgOk && $msg === 'User added successfully.';
 $otpInlineError = ($openAddUserModal && $addUserInvalidField === 'otp') ? 'Invalid OTP' : '';
 $openEditUserModal = false;
-$editUserInvalidField = '';
-$editOtpInlineError = '';
+$editOriginalEmail = '';
 $editModalData = [
     'user_id' => '',
     'username' => '',
@@ -302,10 +318,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $nextResendAt = (int)($_SESSION['add_user_otp_resend_at'] ?? 0);
         $now = time();
         if ($nextResendAt > $now) {
+            $retryAfter = $nextResendAt - $now;
             http_response_code(429);
             echo json_encode([
                 'success' => false,
-                'message' => 'Please wait ' . ($nextResendAt - $now) . ' second(s) before resending OTP.',
+                'message' => 'Please wait ' . $retryAfter . ' second(s) before resending OTP.',
+                'retry_after' => $retryAfter,
             ]);
             exit;
         }
@@ -326,22 +344,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         echo json_encode(['success' => true, 'message' => 'OTP has been sent to the provided Gmail/email.']);
         exit;
     }
-    if ($action === 'send_edit_user_otp') {
+    if ($action === 'send_edit_user_change_otp') {
         header('Content-Type: application/json');
-        $email = trim((string)($_POST['email'] ?? ''));
+        $userId = trim((string)($_POST['user_id'] ?? ''));
+        $newEmail = trim((string)($_POST['new_email'] ?? ''));
         $name = trim((string)($_POST['name'] ?? $_POST['username'] ?? ''));
-        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        if ($userId === '') {
+            http_response_code(422);
+            echo json_encode(['success' => false, 'message' => 'Invalid user selected.']);
+            exit;
+        }
+        if ($newEmail === '' || !filter_var($newEmail, FILTER_VALIDATE_EMAIL)) {
             http_response_code(422);
             echo json_encode(['success' => false, 'message' => 'Enter a valid Gmail/email address first.']);
             exit;
         }
-        $nextResendAt = (int)($_SESSION['edit_user_otp_resend_at'] ?? 0);
+        try {
+            $pdo = dbPdo($config);
+            $userStmt = $pdo->prepare('SELECT email FROM users WHERE id = :id LIMIT 1');
+            $userStmt->execute([':id' => $userId]);
+            $existingUser = $userStmt->fetch() ?: null;
+        } catch (Exception $e) {
+            $existingUser = null;
+        }
+        if (!$existingUser) {
+            http_response_code(422);
+            echo json_encode(['success' => false, 'message' => 'Invalid user selected.']);
+            exit;
+        }
+        $currentEmail = strtolower(trim((string)($existingUser['email'] ?? '')));
+        $targetEmail = strtolower($newEmail);
+        if ($currentEmail !== '' && $targetEmail === $currentEmail) {
+            http_response_code(422);
+            echo json_encode(['success' => false, 'message' => 'Email did not change.']);
+            exit;
+        }
+        if ($currentEmail === '' || !filter_var($currentEmail, FILTER_VALIDATE_EMAIL)) {
+            http_response_code(422);
+            echo json_encode(['success' => false, 'message' => 'Current account email is invalid.']);
+            exit;
+        }
+        $nextResendAt = (int)($_SESSION['edit_user_change_otp_resend_at'] ?? 0);
         $now = time();
         if ($nextResendAt > $now) {
+            $retryAfter = $nextResendAt - $now;
             http_response_code(429);
             echo json_encode([
                 'success' => false,
-                'message' => 'Please wait ' . ($nextResendAt - $now) . ' second(s) before resending OTP.',
+                'message' => 'Please wait ' . $retryAfter . ' second(s) before resending OTP.',
+                'retry_after' => $retryAfter,
             ]);
             exit;
         }
@@ -350,16 +401,63 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $expiryMinutes = 5;
         }
         $otp = (string)random_int(100000, 999999);
-        $_SESSION['edit_user_otp_code_hash'] = password_hash($otp, PASSWORD_DEFAULT);
-        $_SESSION['edit_user_otp_email'] = strtolower($email);
-        $_SESSION['edit_user_otp_expires_at'] = time() + ($expiryMinutes * 60);
-        $_SESSION['edit_user_otp_resend_at'] = time() + 30;
-        if (!sendAddUserOtpEmail($email, $otp, $config, $name)) {
+        $_SESSION['edit_user_change_otp_code_hash'] = password_hash($otp, PASSWORD_DEFAULT);
+        $_SESSION['edit_user_change_otp_user_id'] = $userId;
+        $_SESSION['edit_user_change_otp_old_email'] = $currentEmail;
+        $_SESSION['edit_user_change_otp_new_email'] = $targetEmail;
+        $_SESSION['edit_user_change_otp_expires_at'] = time() + ($expiryMinutes * 60);
+        $_SESSION['edit_user_change_otp_resend_at'] = time() + 15;
+        if (!sendEditUserChangeOtpEmail($currentEmail, $otp, $config, $name)) {
             http_response_code(500);
             echo json_encode(['success' => false, 'message' => 'Failed to send OTP. Please try again.']);
             exit;
         }
-        echo json_encode(['success' => true, 'message' => 'OTP has been sent to the provided Gmail/email.']);
+        echo json_encode(['success' => true, 'message' => 'OTP sent to old Gmail/email for confirmation.']);
+        exit;
+    }
+    if ($action === 'verify_edit_user_change_otp') {
+        header('Content-Type: application/json');
+        $userId = trim((string)($_POST['user_id'] ?? ''));
+        $newEmail = strtolower(trim((string)($_POST['new_email'] ?? '')));
+        $otpInput = trim((string)($_POST['otp'] ?? ''));
+        $otpHash = (string)($_SESSION['edit_user_change_otp_code_hash'] ?? '');
+        $otpUserId = trim((string)($_SESSION['edit_user_change_otp_user_id'] ?? ''));
+        $otpOldEmail = strtolower(trim((string)($_SESSION['edit_user_change_otp_old_email'] ?? '')));
+        $otpNewEmail = strtolower(trim((string)($_SESSION['edit_user_change_otp_new_email'] ?? '')));
+        $otpExpiresAt = (int)($_SESSION['edit_user_change_otp_expires_at'] ?? 0);
+
+        if ($userId === '' || $newEmail === '' || !filter_var($newEmail, FILTER_VALIDATE_EMAIL)) {
+            http_response_code(422);
+            echo json_encode(['success' => false, 'message' => 'Invalid email change request.']);
+            exit;
+        }
+        if (!preg_match('/^\d{6}$/', $otpInput)) {
+            http_response_code(422);
+            echo json_encode(['success' => false, 'message' => 'Please enter a valid 6-digit OTP.']);
+            exit;
+        }
+        if ($otpHash === '' || $otpUserId === '' || $otpOldEmail === '' || $otpNewEmail === '' || $otpExpiresAt <= 0) {
+            http_response_code(422);
+            echo json_encode(['success' => false, 'message' => 'No OTP request found. Please resend OTP.']);
+            exit;
+        }
+        if ($userId !== $otpUserId || $newEmail !== $otpNewEmail) {
+            http_response_code(422);
+            echo json_encode(['success' => false, 'message' => 'Email changed after OTP request. Please resend OTP.']);
+            exit;
+        }
+        if (time() > $otpExpiresAt) {
+            unset($_SESSION['edit_user_change_otp_code_hash'], $_SESSION['edit_user_change_otp_user_id'], $_SESSION['edit_user_change_otp_old_email'], $_SESSION['edit_user_change_otp_new_email'], $_SESSION['edit_user_change_otp_expires_at']);
+            http_response_code(422);
+            echo json_encode(['success' => false, 'message' => 'OTP expired. Please resend OTP.']);
+            exit;
+        }
+        if (!password_verify($otpInput, $otpHash)) {
+            http_response_code(422);
+            echo json_encode(['success' => false, 'message' => 'Incorrect OTP. Please retype or resend OTP.']);
+            exit;
+        }
+        echo json_encode(['success' => true, 'message' => 'OTP verified.']);
         exit;
     }
     if ($action === 'add_user') {
@@ -432,7 +530,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $openAddUserModal = true;
         }
     } elseif ($action === 'update_user') {
-        $editUserInvalidField = '';
         $editModalData['user_id'] = trim((string)($_POST['user_id'] ?? ''));
         $editModalData['username'] = trim((string)($_POST['username'] ?? ''));
         $editModalData['name'] = trim((string)($_POST['name'] ?? ''));
@@ -442,16 +539,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $newPassword = (string)($_POST['password'] ?? '');
         $confirmPassword = (string)($_POST['confirm_password'] ?? '');
-        $editOtpInput = trim((string)($_POST['edit_email_otp'] ?? ''));
-        $editOtpHash = (string)($_SESSION['edit_user_otp_code_hash'] ?? '');
-        $editOtpEmail = (string)($_SESSION['edit_user_otp_email'] ?? '');
-        $editOtpExpiresAt = (int)($_SESSION['edit_user_otp_expires_at'] ?? 0);
+        $editOtpInput = trim((string)($_POST['edit_email_change_otp'] ?? ''));
+        $editOtpHash = (string)($_SESSION['edit_user_change_otp_code_hash'] ?? '');
+        $editOtpUserId = trim((string)($_SESSION['edit_user_change_otp_user_id'] ?? ''));
+        $editOtpOldEmail = strtolower(trim((string)($_SESSION['edit_user_change_otp_old_email'] ?? '')));
+        $editOtpNewEmail = strtolower(trim((string)($_SESSION['edit_user_change_otp_new_email'] ?? '')));
+        $editOtpExpiresAt = (int)($_SESSION['edit_user_change_otp_expires_at'] ?? 0);
         $formEmail = strtolower(trim((string)$editModalData['email']));
         $allowedRoles = ['superadmin', 'admin', 'user', 'staff', 'departmenthead', 'department_head', 'dept_head'];
         if (!in_array($editModalData['role'], $allowedRoles, true)) {
             $editModalData['role'] = 'user';
         }
-        if ($editModalData['user_id'] === '') {
+        $currentUser = null;
+        if ($editModalData['user_id'] !== '') {
+            try {
+                $pdo = dbPdo($config);
+                $currentUserStmt = $pdo->prepare('SELECT email FROM users WHERE id = :id LIMIT 1');
+                $currentUserStmt->execute([':id' => $editModalData['user_id']]);
+                $currentUser = $currentUserStmt->fetch() ?: null;
+                $editOriginalEmail = trim((string)($currentUser['email'] ?? ''));
+            } catch (Exception $e) {
+                $currentUser = null;
+                $editOriginalEmail = '';
+            }
+        }
+        $emailChanged = strtolower($editOriginalEmail) !== $formEmail;
+        if ($editModalData['user_id'] === '' || !$currentUser) {
             $msg = 'Invalid user selected.';
             $msgOk = false;
         } elseif ($editModalData['username'] === '' || $editModalData['email'] === '') {
@@ -460,27 +573,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif (!filter_var($editModalData['email'], FILTER_VALIDATE_EMAIL)) {
             $msg = 'Please enter a valid email address.';
             $msgOk = false;
-        } elseif ($editOtpInput === '') {
-            $msg = 'Invalid OTP';
+        } elseif ($emailChanged && $editOtpInput === '') {
+            $msg = 'OTP confirmation is required to change email.';
             $msgOk = false;
-            $editUserInvalidField = 'otp';
-        } elseif ($editOtpHash === '' || $editOtpEmail === '' || $editOtpExpiresAt <= 0) {
-            $msg = 'Invalid OTP';
+        } elseif ($emailChanged && ($editOtpHash === '' || $editOtpUserId === '' || $editOtpOldEmail === '' || $editOtpNewEmail === '' || $editOtpExpiresAt <= 0)) {
+            $msg = 'OTP request not found. Please try saving again.';
             $msgOk = false;
-            $editUserInvalidField = 'otp';
-        } elseif ($formEmail === '' || $formEmail !== $editOtpEmail) {
-            $msg = 'Invalid OTP';
+        } elseif ($emailChanged && ($editModalData['user_id'] !== $editOtpUserId || $formEmail === '' || $formEmail !== $editOtpNewEmail || strtolower($editOriginalEmail) !== $editOtpOldEmail)) {
+            $msg = 'Email changed after OTP request. Please try again.';
             $msgOk = false;
-            $editUserInvalidField = 'otp';
-        } elseif (time() > $editOtpExpiresAt) {
-            unset($_SESSION['edit_user_otp_code_hash'], $_SESSION['edit_user_otp_email'], $_SESSION['edit_user_otp_expires_at']);
-            $msg = 'Invalid OTP';
+        } elseif ($emailChanged && time() > $editOtpExpiresAt) {
+            unset($_SESSION['edit_user_change_otp_code_hash'], $_SESSION['edit_user_change_otp_user_id'], $_SESSION['edit_user_change_otp_old_email'], $_SESSION['edit_user_change_otp_new_email'], $_SESSION['edit_user_change_otp_expires_at']);
+            $msg = 'OTP expired. Please try again.';
             $msgOk = false;
-            $editUserInvalidField = 'otp';
-        } elseif (!password_verify($editOtpInput, $editOtpHash)) {
-            $msg = 'Invalid OTP';
+        } elseif ($emailChanged && !password_verify($editOtpInput, $editOtpHash)) {
+            $msg = 'Invalid OTP confirmation code.';
             $msgOk = false;
-            $editUserInvalidField = 'otp';
         } elseif ($newPassword !== '' && !preg_match('/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/', $newPassword)) {
             $msg = 'Password must be at least 8 characters and include uppercase, lowercase, number, and special character.';
             $msgOk = false;
@@ -532,7 +640,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ]);
                     }
                     if ($ok) {
-                        unset($_SESSION['edit_user_otp_code_hash'], $_SESSION['edit_user_otp_email'], $_SESSION['edit_user_otp_expires_at'], $_SESSION['edit_user_otp_resend_at']);
+                        unset($_SESSION['edit_user_change_otp_code_hash'], $_SESSION['edit_user_change_otp_user_id'], $_SESSION['edit_user_change_otp_old_email'], $_SESSION['edit_user_change_otp_new_email'], $_SESSION['edit_user_change_otp_expires_at'], $_SESSION['edit_user_change_otp_resend_at']);
                         activityLog($config, 'user_edit', [
                             'module' => 'super_admin_users',
                             'target_user_id' => $editModalData['user_id'],
@@ -552,9 +660,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $msg = 'Error: ' . $e->getMessage();
                 $msgOk = false;
             }
-        }
-        if ($openEditUserModal && $editUserInvalidField === 'otp') {
-            $editOtpInlineError = 'Invalid OTP';
         }
     } elseif ($action === 'disable_user') {
         $flash = updateUserAccountState(
@@ -694,6 +799,7 @@ function getUserAccountStatusMeta($u) {
         .main-content .admin-content-body { padding-top: 24px; }
         .offices-card .offices-tools.doc-filter-row select { height: 42px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0 12px; font-size: 14px; color: #1e293b; background: #fff; font-family: 'Poppins', sans-serif; }
         .users-toast { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 1500; display: flex; align-items: center; gap: 12px; padding: 0.875rem 1rem; border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,0.15); max-width: 360px; animation: users-toast-in 0.3s ease; }
+        .users-toast.is-hiding { opacity: 0; transform: translateY(8px); transition: opacity 0.25s ease, transform 0.25s ease; }
         .users-toast.success { background: #22c55e; color: #fff; }
         .users-toast.error { background: #ef4444; color: #fff; }
         @keyframes users-toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
@@ -841,28 +947,6 @@ function getUserAccountStatusMeta($u) {
         #edit-user-modal .password-match-msg { margin: -2px 0 0; font-size: 12px; font-weight: 600; }
         #edit-user-modal .password-match-msg.match { color: #166534; }
         #edit-user-modal .password-match-msg.mismatch { color: #dc2626; }
-        #edit-user-modal .otp-row { display: flex; gap: 10px; align-items: center; }
-        #edit-user-modal .otp-row input { flex: 1; min-width: 0; }
-        #edit-user-modal .otp-send-btn {
-            height: 40px;
-            border: 1px solid #bfdbfe;
-            background: #eff6ff;
-            color: #1d4ed8;
-            border-radius: 10px;
-            padding: 0 12px;
-            font-weight: 600;
-            cursor: pointer;
-            font-family: 'Poppins', sans-serif;
-            white-space: nowrap;
-        }
-        #edit-user-modal .otp-send-btn:disabled { opacity: 0.7; cursor: not-allowed; }
-        #edit-user-modal .otp-status { margin: 4px 0 0; font-size: 12px; }
-        #edit-user-modal .otp-status.ok { color: #166534; }
-        #edit-user-modal .otp-status.err { color: #dc2626; }
-        #edit-user-modal #edit-user-email-otp.is-invalid {
-            border-color: #dc2626 !important;
-            box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.14);
-        }
         #edit-user-modal .doc-form-field input:focus,
         #edit-user-modal .doc-form-field select:focus {
             outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
@@ -870,6 +954,72 @@ function getUserAccountStatusMeta($u) {
         #edit-user-modal .doc-modal-actions { margin-top: 6px; display: flex; justify-content: flex-end; gap: 10px; grid-column: 1 / -1; }
         #edit-user-modal .doc-btn { min-height: 38px; padding: 0 14px; border-radius: 10px; font-weight: 600; }
         #edit-user-modal .doc-form-error { margin: 0; font-size: 13px; color: #dc2626; grid-column: 1 / -1; }
+        #edit-user-otp-confirm-modal .doc-modal-dialog { width: min(460px, calc(100vw - 24px)); border-radius: 14px; overflow: hidden; }
+        #edit-user-otp-confirm-modal .doc-modal-header {
+            position: relative;
+            display: block;
+            padding: 16px 44px 12px 18px;
+            border-bottom: 1px solid #e2e8f0;
+            background: #ffffff;
+        }
+        #edit-user-otp-confirm-modal .doc-modal-header h2 {
+            margin: 0;
+            font-size: 1.1rem;
+            line-height: 1.25;
+            color: #1e293b;
+        }
+        #edit-user-otp-confirm-modal .doc-modal-header .doc-modal-close {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+        }
+        #edit-user-otp-confirm-modal .doc-modal-subtitle {
+            margin: 6px 0 0;
+            color: #64748b;
+            font-size: 0.84rem;
+            line-height: 1.4;
+        }
+        #edit-user-otp-confirm-modal .doc-modal-form { padding: 16px 18px 18px; display: grid; gap: 12px; }
+        #edit-user-otp-confirm-modal input {
+            width: 100%;
+            height: 40px;
+            border: 1px solid #dbe2ea;
+            border-radius: 10px;
+            padding: 0 12px;
+            font-size: 14px;
+            font-family: 'Poppins', sans-serif;
+            color: #0f172a;
+            background: #fff;
+            box-sizing: border-box;
+        }
+        #edit-user-otp-confirm-modal .otp-status { margin: 0; font-size: 12px; line-height: 1.35; color: #475569; }
+        #edit-user-otp-confirm-modal .otp-status.err { color: #dc2626; }
+        #edit-user-otp-confirm-modal .doc-modal-actions {
+            margin-top: 4px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        #edit-user-otp-confirm-modal .doc-btn { min-height: 36px; padding: 0 12px; }
+        #edit-user-otp-confirm-modal .doc-btn-resend {
+            border: 1px solid #bfdbfe;
+            background: #eff6ff;
+            color: #1d4ed8;
+        }
+        #edit-user-otp-confirm-modal .doc-btn-resend:hover {
+            background: #dbeafe;
+            border-color: #93c5fd;
+        }
+        #edit-user-otp-confirm-modal .doc-btn-resend:disabled,
+        #edit-user-otp-confirm-modal .doc-btn-resend:disabled:hover {
+            background: #eff6ff;
+            border-color: #bfdbfe;
+            color: #1d4ed8;
+            opacity: 0.6;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
         @media (max-width: 640px) {
             #add-user-modal .doc-modal-dialog { width: calc(100vw - 16px); }
             #add-user-modal .doc-modal-form { padding: 14px; gap: 10px; grid-template-columns: 1fr; }
@@ -877,6 +1027,9 @@ function getUserAccountStatusMeta($u) {
             #edit-user-modal .doc-modal-dialog { width: calc(100vw - 16px); }
             #edit-user-modal .doc-modal-form { padding: 14px; gap: 10px; grid-template-columns: 1fr; }
             #edit-user-modal .doc-modal-actions { gap: 8px; }
+            #edit-user-otp-confirm-modal .doc-modal-dialog { width: calc(100vw - 16px); }
+            #edit-user-otp-confirm-modal .doc-modal-header { padding-right: 40px; }
+            #edit-user-otp-confirm-modal .doc-modal-form { padding: 14px; gap: 10px; }
         }
     </style>
 </head>
@@ -1100,12 +1253,14 @@ function getUserAccountStatusMeta($u) {
         <div class="doc-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-user-title">
             <div class="doc-modal-header">
                 <h2 id="edit-user-title">Edit User</h2>
-                <p class="doc-modal-subtitle">Update account details and role.</p>
+                <p class="doc-modal-subtitle">Changing user information.</p>
                 <button type="button" class="doc-modal-close" data-close-edit-user aria-label="Close">&times;</button>
             </div>
             <form method="post" action="users.php" id="edit-user-form" class="doc-modal-form">
                 <input type="hidden" name="action" value="update_user">
                 <input type="hidden" id="edit-user-id" name="user_id" value="<?= htmlspecialchars($editModalData['user_id']) ?>">
+                <input type="hidden" id="edit-user-original-email" value="<?= htmlspecialchars($editOriginalEmail) ?>">
+                <input type="hidden" id="edit-email-change-otp" name="edit_email_change_otp" value="">
                 <div class="doc-form-field">
                     <label for="edit-user-username">Username <span class="required">*</span></label>
                     <input type="text" id="edit-user-username" name="username" required value="<?= htmlspecialchars($editModalData['username']) ?>">
@@ -1128,14 +1283,6 @@ function getUserAccountStatusMeta($u) {
                         <option value="staff" <?= $editRole === 'staff' ? 'selected' : '' ?>>Staff</option>
                         <option value="departmenthead" <?= in_array($editRole, ['departmenthead', 'department_head', 'dept_head'], true) ? 'selected' : '' ?>>Department Head</option>
                     </select>
-                </div>
-                <div class="doc-form-field full-span">
-                    <label for="edit-user-email-otp">OTP for Email <span class="required">*</span></label>
-                    <div class="otp-row">
-                        <input type="text" id="edit-user-email-otp" name="edit_email_otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="Enter 6-digit OTP" required autocomplete="one-time-code" class="<?php echo ($openEditUserModal && $editUserInvalidField === 'otp') ? 'is-invalid' : ''; ?>">
-                        <button type="button" class="otp-send-btn" id="send-edit-user-otp-btn">Send OTP</button>
-                    </div>
-                    <p class="otp-status <?php echo $editOtpInlineError !== '' ? 'err' : ''; ?>" id="edit-user-otp-status" <?php echo $editOtpInlineError === '' ? 'hidden' : ''; ?>><?php echo htmlspecialchars($editOtpInlineError); ?></p>
                 </div>
                 <div class="doc-form-field full-span">
                     <label for="edit-user-password">New Password (optional)</label>
@@ -1164,6 +1311,25 @@ function getUserAccountStatusMeta($u) {
                     <button type="submit" class="doc-btn doc-btn-save">Save Changes</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <div class="doc-modal" id="edit-user-otp-confirm-modal" hidden>
+        <button type="button" class="doc-modal-overlay" data-close-edit-user-otp-confirm aria-label="Close"></button>
+        <div class="doc-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-user-otp-confirm-title">
+            <div class="doc-modal-header">
+                <h2 id="edit-user-otp-confirm-title">Confirm OTP</h2>
+                <p class="doc-modal-subtitle">Enter the OTP sent to the old Gmail/email to continue changing user information.</p>
+                <button type="button" class="doc-modal-close" data-close-edit-user-otp-confirm aria-label="Close">&times;</button>
+            </div>
+            <div class="doc-modal-form">
+                <p class="otp-status" id="edit-user-otp-confirm-message">OTP was sent to the old Gmail/email.</p>
+                <input type="text" id="edit-user-otp-confirm-input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="Enter 6-digit OTP" autocomplete="one-time-code">
+                <div class="doc-modal-actions">
+                    <button type="button" class="doc-btn doc-btn-resend" id="resend-edit-user-otp-btn">Resend OTP</button>
+                    <button type="button" class="doc-btn doc-btn-save" id="confirm-edit-user-otp-btn">Confirm OTP</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1236,6 +1402,18 @@ function getUserAccountStatusMeta($u) {
 
     <script>
     (function() {
+        var usersToast = document.getElementById('users-toast');
+        if (usersToast) {
+            window.setTimeout(function() {
+                usersToast.classList.add('is-hiding');
+                window.setTimeout(function() {
+                    if (usersToast && usersToast.parentNode) {
+                        usersToast.parentNode.removeChild(usersToast);
+                    }
+                }, 280);
+            }, 5000);
+        }
+
         var addBtn = document.getElementById('add-user-btn');
         var modal = document.getElementById('add-user-modal');
         var form = document.getElementById('add-user-form');
@@ -1544,38 +1722,138 @@ function getUserAccountStatusMeta($u) {
         var editUsername = document.getElementById('edit-user-username');
         var editName = document.getElementById('edit-user-name');
         var editEmail = document.getElementById('edit-user-email');
+        var editOriginalEmail = document.getElementById('edit-user-original-email');
+        var editEmailChangeOtp = document.getElementById('edit-email-change-otp');
+        var editOtpConfirmModal = document.getElementById('edit-user-otp-confirm-modal');
+        var editOtpConfirmInput = document.getElementById('edit-user-otp-confirm-input');
+        var editOtpConfirmMessage = document.getElementById('edit-user-otp-confirm-message');
+        var confirmEditUserOtpBtn = document.getElementById('confirm-edit-user-otp-btn');
+        var resendEditUserOtpBtn = document.getElementById('resend-edit-user-otp-btn');
+        var editOtpResendCooldownEndsAt = 0;
+        var editOtpResendCooldownTimer = null;
         var editRole = document.getElementById('edit-user-role');
-        var editOtpEl = document.getElementById('edit-user-email-otp');
-        var sendEditOtpBtn = document.getElementById('send-edit-user-otp-btn');
-        var editOtpStatusEl = document.getElementById('edit-user-otp-status');
         var editPwd = document.getElementById('edit-user-password');
         var editConfirmPwd = document.getElementById('edit-user-confirm-password');
         var editStrengthMsg = document.getElementById('edit-password-strength-msg');
         var editMatchMsg = document.getElementById('edit-password-match-msg');
         var editErr = document.getElementById('edit-user-form-error');
         var shouldOpenEditUserModal = <?php echo $openEditUserModal ? 'true' : 'false'; ?>;
-        var invalidEditUserField = <?php echo json_encode($editUserInvalidField); ?>;
         function showEditError(msg) {
             if (!editErr) return;
             if (!msg) { editErr.hidden = true; editErr.textContent = ''; return; }
             editErr.hidden = false; editErr.textContent = msg;
         }
-        function showEditOtpStatus(msg, isOk) {
-            if (!editOtpStatusEl) return;
-            if (!msg) {
-                editOtpStatusEl.hidden = true;
-                editOtpStatusEl.textContent = '';
-                editOtpStatusEl.classList.remove('ok', 'err');
+        function normalizeEmail(value) {
+            return (value || '').trim().toLowerCase();
+        }
+        function isEditEmailChanged() {
+            if (!editEmail) return false;
+            return normalizeEmail(editEmail.value) !== normalizeEmail(editOriginalEmail ? editOriginalEmail.value : '');
+        }
+        function clearEditEmailChangeOtp() {
+            if (editEmailChangeOtp) editEmailChangeOtp.value = '';
+        }
+        function showEditOtpConfirmMessage(msg, isError) {
+            if (!editOtpConfirmMessage) return;
+            editOtpConfirmMessage.textContent = msg || '';
+            editOtpConfirmMessage.classList.toggle('err', !!isError);
+        }
+        function stopEditOtpResendCooldown() {
+            if (editOtpResendCooldownTimer) {
+                clearInterval(editOtpResendCooldownTimer);
+                editOtpResendCooldownTimer = null;
+            }
+            editOtpResendCooldownEndsAt = 0;
+            if (resendEditUserOtpBtn) {
+                resendEditUserOtpBtn.disabled = false;
+                resendEditUserOtpBtn.textContent = 'Resend OTP';
+            }
+        }
+        function tickEditOtpResendCooldown() {
+            if (!resendEditUserOtpBtn || editOtpResendCooldownEndsAt <= 0) return;
+            var remaining = Math.max(0, Math.ceil((editOtpResendCooldownEndsAt - Date.now()) / 1000));
+            if (remaining <= 0) {
+                stopEditOtpResendCooldown();
                 return;
             }
-            editOtpStatusEl.hidden = false;
-            editOtpStatusEl.textContent = msg;
-            editOtpStatusEl.classList.toggle('ok', !!isOk);
-            editOtpStatusEl.classList.toggle('err', !isOk);
+            resendEditUserOtpBtn.disabled = true;
+            resendEditUserOtpBtn.textContent = 'Resend OTP (' + remaining + 's)';
         }
-        function setEditOtpInvalid(state) {
-            if (!editOtpEl) return;
-            editOtpEl.classList.toggle('is-invalid', !!state);
+        function startEditOtpResendCooldown(seconds) {
+            var parsed = parseInt(seconds, 10);
+            if (!(parsed > 0)) return;
+            editOtpResendCooldownEndsAt = Date.now() + (parsed * 1000);
+            if (editOtpResendCooldownTimer) {
+                clearInterval(editOtpResendCooldownTimer);
+            }
+            tickEditOtpResendCooldown();
+            editOtpResendCooldownTimer = setInterval(tickEditOtpResendCooldown, 1000);
+        }
+        function openEditOtpConfirmModal(message) {
+            if (!editOtpConfirmModal) return;
+            if (editModal) editModal.hidden = true;
+            if (editOtpConfirmInput) editOtpConfirmInput.value = '';
+            showEditOtpConfirmMessage(message || 'OTP sent to old Gmail/email.', false);
+            editOtpConfirmModal.hidden = false;
+            document.body.classList.add('modal-open');
+            if (editOtpResendCooldownEndsAt > Date.now()) {
+                tickEditOtpResendCooldown();
+            }
+            if (editOtpConfirmInput) {
+                setTimeout(function() { editOtpConfirmInput.focus(); }, 0);
+            }
+        }
+        function closeEditOtpConfirmModal(restoreEditModal) {
+            if (!editOtpConfirmModal) return;
+            editOtpConfirmModal.hidden = true;
+            if (editOtpConfirmInput) editOtpConfirmInput.value = '';
+            showEditOtpConfirmMessage('OTP was sent to the old Gmail/email.', false);
+            if (restoreEditModal && editModal) {
+                editModal.hidden = false;
+                document.body.classList.add('modal-open');
+            }
+        }
+        function requestEditEmailChangeOtp() {
+            var fd = new FormData();
+            fd.append('action', 'send_edit_user_change_otp');
+            fd.append('user_id', (editUserId && editUserId.value) ? editUserId.value.trim() : '');
+            fd.append('new_email', (editEmail && editEmail.value) ? editEmail.value.trim() : '');
+            fd.append('name', ((editName && editName.value) ? editName.value : ((editUsername && editUsername.value) ? editUsername.value : '')).trim());
+            return fetch('users.php', {
+                method: 'POST',
+                body: fd,
+                credentials: 'same-origin'
+            }).then(function(resp) {
+                return resp.json().then(function(data) {
+                    if (!resp.ok || !data.success) {
+                        var err = new Error((data && data.message) ? data.message : 'Failed to send OTP.');
+                        if (data && typeof data.retry_after !== 'undefined') {
+                            err.retryAfter = parseInt(data.retry_after, 10) || 0;
+                        }
+                        throw err;
+                    }
+                    return data;
+                });
+            });
+        }
+        function verifyEditEmailChangeOtp(otpDigits) {
+            var fd = new FormData();
+            fd.append('action', 'verify_edit_user_change_otp');
+            fd.append('user_id', (editUserId && editUserId.value) ? editUserId.value.trim() : '');
+            fd.append('new_email', (editEmail && editEmail.value) ? editEmail.value.trim() : '');
+            fd.append('otp', otpDigits || '');
+            return fetch('users.php', {
+                method: 'POST',
+                body: fd,
+                credentials: 'same-origin'
+            }).then(function(resp) {
+                return resp.json().then(function(data) {
+                    if (!resp.ok || !data.success) {
+                        throw new Error((data && data.message) ? data.message : 'OTP verification failed.');
+                    }
+                    return data;
+                });
+            });
         }
         function openEditUserModal(userData) {
             if (!editModal) return;
@@ -1584,15 +1862,16 @@ function getUserAccountStatusMeta($u) {
                 if (editUsername) editUsername.value = userData.username || '';
                 if (editName) editName.value = userData.name || '';
                 if (editEmail) editEmail.value = userData.email || '';
+                if (editOriginalEmail) editOriginalEmail.value = userData.email || '';
+                clearEditEmailChangeOtp();
+                stopEditOtpResendCooldown();
+                closeEditOtpConfirmModal(false);
                 if (editRole) editRole.value = userData.role || 'user';
-                if (editOtpEl) editOtpEl.value = '';
                 if (editPwd) editPwd.value = '';
                 if (editConfirmPwd) editConfirmPwd.value = '';
             }
             if (editStrengthMsg) { editStrengthMsg.hidden = true; editStrengthMsg.textContent = ''; editStrengthMsg.classList.remove('weak', 'strong'); }
             if (editMatchMsg) { editMatchMsg.hidden = true; editMatchMsg.textContent = ''; editMatchMsg.classList.remove('match', 'mismatch'); }
-            showEditOtpStatus('');
-            setEditOtpInvalid(false);
             showEditError('');
             editModal.hidden = false;
             document.body.classList.add('modal-open');
@@ -1601,8 +1880,9 @@ function getUserAccountStatusMeta($u) {
             if (!editModal) return;
             editModal.hidden = true;
             document.body.classList.remove('modal-open');
-            showEditOtpStatus('');
-            setEditOtpInvalid(false);
+            clearEditEmailChangeOtp();
+            stopEditOtpResendCooldown();
+            closeEditOtpConfirmModal(false);
             showEditError('');
         }
         document.querySelectorAll('.js-edit-user-btn').forEach(function(btn) {
@@ -1653,56 +1933,66 @@ function getUserAccountStatusMeta($u) {
         if (editConfirmPwd) editConfirmPwd.addEventListener('input', updateEditPasswordMatch);
         if (editEmail) {
             editEmail.addEventListener('input', function() {
-                showEditOtpStatus('');
+                clearEditEmailChangeOtp();
+                closeEditOtpConfirmModal(false);
             });
         }
-        if (editOtpEl) {
-            editOtpEl.addEventListener('input', function() {
-                editOtpEl.value = (editOtpEl.value || '').replace(/\D/g, '').slice(0, 6);
-                setEditOtpInvalid(false);
+        if (editOtpConfirmInput) {
+            editOtpConfirmInput.addEventListener('input', function() {
+                editOtpConfirmInput.value = (editOtpConfirmInput.value || '').replace(/\D/g, '').slice(0, 6);
             });
-            editOtpEl.addEventListener('paste', function(e) {
+            editOtpConfirmInput.addEventListener('paste', function(e) {
                 var pasted = (e.clipboardData || window.clipboardData).getData('text') || '';
-                var digits = pasted.replace(/\D/g, '').slice(0, 6);
                 e.preventDefault();
-                editOtpEl.value = digits;
-                setEditOtpInvalid(false);
+                editOtpConfirmInput.value = pasted.replace(/\D/g, '').slice(0, 6);
             });
         }
-        if (sendEditOtpBtn) {
-            sendEditOtpBtn.addEventListener('click', function() {
-                if (!editEmail) return;
-                var emailValue = (editEmail.value || '').trim();
-                if (!emailValue) {
-                    showEditOtpStatus('Enter the Gmail/email first.', false);
+        document.querySelectorAll('[data-close-edit-user-otp-confirm]').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                closeEditOtpConfirmModal(true);
+            });
+        });
+        if (confirmEditUserOtpBtn) {
+            confirmEditUserOtpBtn.addEventListener('click', function() {
+                var digits = String((editOtpConfirmInput && editOtpConfirmInput.value) ? editOtpConfirmInput.value : '').replace(/\D/g, '').slice(0, 6);
+                if (!/^\d{6}$/.test(digits)) {
+                    showEditOtpConfirmMessage('Please enter a valid 6-digit OTP.', true);
                     return;
                 }
-                sendEditOtpBtn.disabled = true;
-                var originalText = sendEditOtpBtn.textContent;
-                sendEditOtpBtn.textContent = 'Sending...';
-                var fd = new FormData();
-                fd.append('action', 'send_edit_user_otp');
-                fd.append('email', emailValue);
-                fd.append('name', ((editName && editName.value) ? editName.value : ((editUsername && editUsername.value) ? editUsername.value : '')).trim());
-                fetch('users.php', {
-                    method: 'POST',
-                    body: fd,
-                    credentials: 'same-origin'
-                }).then(function(resp) {
-                    return resp.json().then(function(data) {
-                        if (!resp.ok || !data.success) {
-                            throw new Error((data && data.message) ? data.message : 'Failed to send OTP.');
-                        }
-                        return data;
-                    });
-                }).then(function(data) {
-                    setEditOtpInvalid(false);
-                    showEditOtpStatus(data.message || 'OTP sent successfully.', true);
+                verifyEditEmailChangeOtp(digits).then(function() {
+                    if (editEmailChangeOtp) editEmailChangeOtp.value = digits;
+                    showEditError('');
+                    closeEditOtpConfirmModal(true);
                 }).catch(function(err) {
-                    showEditOtpStatus(err.message || 'Failed to send OTP.', false);
+                    showEditOtpConfirmMessage(err && err.message ? err.message : 'OTP verification failed.', true);
+                });
+            });
+        }
+        if (resendEditUserOtpBtn) {
+            resendEditUserOtpBtn.addEventListener('click', function() {
+                if (editOtpResendCooldownEndsAt > Date.now()) {
+                    tickEditOtpResendCooldown();
+                    return;
+                }
+                resendEditUserOtpBtn.disabled = true;
+                var originalText = resendEditUserOtpBtn.textContent;
+                resendEditUserOtpBtn.textContent = 'Sending...';
+                requestEditEmailChangeOtp().then(function(data) {
+                    startEditOtpResendCooldown(15);
+                    clearEditEmailChangeOtp();
+                    if (editOtpConfirmInput) editOtpConfirmInput.value = '';
+                    showEditOtpConfirmMessage((data && data.message) ? data.message : 'OTP resent to old Gmail/email.', false);
+                }).catch(function(err) {
+                    if (err && err.retryAfter > 0) {
+                        startEditOtpResendCooldown(err.retryAfter);
+                    } else {
+                        showEditOtpConfirmMessage(err && err.message ? err.message : 'Failed to resend OTP.', true);
+                    }
                 }).finally(function() {
-                    sendEditOtpBtn.disabled = false;
-                    sendEditOtpBtn.textContent = originalText;
+                    if (!(editOtpResendCooldownEndsAt > Date.now())) {
+                        resendEditUserOtpBtn.disabled = false;
+                        resendEditUserOtpBtn.textContent = originalText;
+                    }
                 });
             });
         }
@@ -1721,6 +2011,7 @@ function getUserAccountStatusMeta($u) {
             editForm.addEventListener('submit', function(e) {
                 var pwdValue = (editPwd && editPwd.value) ? editPwd.value : '';
                 var confirmValue = (editConfirmPwd && editConfirmPwd.value) ? editConfirmPwd.value : '';
+                var requireOtp = isEditEmailChanged();
                 if (pwdValue !== '' && !isStrongPassword(pwdValue)) {
                     e.preventDefault();
                     showEditError('Password must be at least 8 characters and include uppercase, lowercase, number, and special character.');
@@ -1732,11 +2023,19 @@ function getUserAccountStatusMeta($u) {
                     updateEditPasswordMatch();
                     return;
                 }
-                if (!editOtpEl || !/^\d{6}$/.test((editOtpEl.value || '').trim())) {
+                if (requireOtp && (!editEmailChangeOtp || !/^\d{6}$/.test((editEmailChangeOtp.value || '').trim()))) {
                     e.preventDefault();
-                    setEditOtpInvalid(true);
-                    showEditOtpStatus('Invalid OTP', false);
-                    showEditError('Invalid OTP');
+                    requestEditEmailChangeOtp().then(function(data) {
+                        startEditOtpResendCooldown(15);
+                        openEditOtpConfirmModal((data && data.message) ? data.message : 'OTP sent to old Gmail/email.');
+                    }).catch(function(err) {
+                        if (err && err.retryAfter > 0) {
+                            openEditOtpConfirmModal(err && err.message ? err.message : 'Please wait before resending OTP.');
+                            startEditOtpResendCooldown(err.retryAfter);
+                        } else {
+                            showEditError(err && err.message ? err.message : 'Failed to send OTP.');
+                        }
+                    });
                     return;
                 }
                 if (!editUserId || !editUserId.value.trim()) {
@@ -1751,12 +2050,10 @@ function getUserAccountStatusMeta($u) {
             if (editUsername) editUsername.value = <?php echo json_encode($editModalData['username']); ?>;
             if (editName) editName.value = <?php echo json_encode($editModalData['name']); ?>;
             if (editEmail) editEmail.value = <?php echo json_encode($editModalData['email']); ?>;
+            if (editOriginalEmail) editOriginalEmail.value = <?php echo json_encode($editOriginalEmail); ?>;
+            clearEditEmailChangeOtp();
+            closeEditOtpConfirmModal(false);
             if (editRole) editRole.value = <?php echo json_encode($editModalData['role']); ?>;
-            if (invalidEditUserField === 'otp') {
-                if (editOtpEl) editOtpEl.value = '';
-                setEditOtpInvalid(true);
-                showEditOtpStatus('Invalid OTP', false);
-            }
             showEditError(<?php echo json_encode($openEditUserModal && !$msgOk ? (string)$msg : ''); ?>);
         }
 

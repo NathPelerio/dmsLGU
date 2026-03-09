@@ -150,7 +150,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 ':stamp_width_pct' => $stampWidth,
                 ':stamp_x_pct' => $stampX,
                 ':stamp_y_pct' => $stampY,
-                ':sent_by_user_id' => $_SESSION['user_id'] ?? '',
+                ':sent_by_user_id' => (($_SESSION['user_id'] ?? '') !== '' ? $_SESSION['user_id'] : null),
                 ':sent_by_user_name' => $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User',
                 ':sent_at' => dbNowUtcString(),
             ]);
@@ -161,8 +161,82 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 'document_title' => (string)$docTitle,
             ]);
         }
-    } catch (Exception $e) {}
+    } catch (Exception $e) {
+        error_log('[send_to_admin] ' . $e->getMessage());
+    }
     header('Location: documents.php?sent=1');
+    exit;
+}
+
+// Send document to Department Head from Super Admin.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'send_to_head') {
+    $docId = trim((string)($_POST['document_id'] ?? ''));
+    $officeIds = isset($_POST['office_id']) ? (is_array($_POST['office_id']) ? $_POST['office_id'] : [$_POST['office_id']]) : [];
+    $officeIds = array_filter(array_map('trim', $officeIds));
+    $officeIds = array_values(array_unique($officeIds));
+    $sendHeadError = '';
+    if ($docId !== '' && count($officeIds) > 0) {
+        try {
+            $pdo = dbPdo($config);
+            $docStmt = $pdo->prepare('SELECT id FROM documents WHERE id = :id LIMIT 1');
+            $docStmt->execute([':id' => $docId]);
+            if ($docStmt->fetch()) {
+                $sentCount = 0;
+                $ins = $pdo->prepare(
+                    'INSERT INTO sent_to_department_heads
+                        (document_id, office_id, office_name, office_head_id, office_head_name, sent_at, sent_by_user_id, sent_by_user_name)
+                     VALUES
+                        (:document_id, :office_id, :office_name, :office_head_id, :office_head_name, :sent_at, :sent_by_user_id, :sent_by_user_name)'
+                );
+                foreach ($officeIds as $officeId) {
+                    $officeStmt = $pdo->prepare('SELECT * FROM offices WHERE id = :id LIMIT 1');
+                    $officeStmt->execute([':id' => $officeId]);
+                    $office = $officeStmt->fetch();
+                    if (!$office) continue;
+
+                    $rawHeadId = $office['office_head_id'] ?? null;
+                    $officeHeadId = ($rawHeadId !== null && (string)$rawHeadId !== '') ? $rawHeadId : null;
+                    $officeHeadName = trim((string)($office['office_head'] ?? ''));
+                    $officeName = trim((string)($office['office_name'] ?? $office['office_code'] ?? 'Department'));
+                    if ($officeHeadId === null && $officeHeadName === '') continue;
+
+                    $rawUserId = $_SESSION['user_id'] ?? null;
+                    $sentByUserId = ($rawUserId !== null && (string)$rawUserId !== '') ? $rawUserId : null;
+
+                    $ins->execute([
+                        ':document_id' => $docId,
+                        ':office_id' => $officeId,
+                        ':office_name' => $officeName,
+                        ':office_head_id' => $officeHeadId,
+                        ':office_head_name' => $officeHeadName,
+                        ':sent_at' => dbNowUtcString(),
+                        ':sent_by_user_id' => $sentByUserId,
+                        ':sent_by_user_name' => $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User',
+                    ]);
+                    $sentCount++;
+                }
+                if ($sentCount > 0) {
+                    activityLog($config, 'document_send_to_department_heads', [
+                        'module' => 'super_admin_documents',
+                        'document_id' => $docId,
+                        'target_count' => (string)$sentCount,
+                    ]);
+                    header('Location: documents.php?sent_head=1&count=' . (int)$sentCount);
+                    exit;
+                } else {
+                    $sendHeadError = 'No valid department head found for the selected office.';
+                }
+            } else {
+                $sendHeadError = 'Document not found.';
+            }
+        } catch (Exception $e) {
+            $sendHeadError = 'Database error: ' . $e->getMessage();
+            error_log('[send_to_head] ' . $e->getMessage());
+        }
+    } else {
+        $sendHeadError = 'Missing document ID or office.';
+    }
+    header('Location: documents.php?send_error=1&detail=' . urlencode($sendHeadError));
     exit;
 }
 
@@ -364,8 +438,11 @@ try {
 $currentUserStampCfg = getUserStampConfig($_SESSION['user_id'] ?? '');
 $currentUserStamp = trim((string)($currentUserStampCfg['stamp'] ?? ''));
 $showSentToast = isset($_GET['sent']) && $_GET['sent'] === '1';
+$showSentHeadToast = isset($_GET['sent_head']) && $_GET['sent_head'] === '1';
+$showSentHeadCount = isset($_GET['count']) ? (int)$_GET['count'] : 0;
 $showAddedToast = isset($_GET['added']) && $_GET['added'] === '1';
 $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
+$sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
 
 ?>
 <!DOCTYPE html>
@@ -445,7 +522,7 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
         }
     </style>
 </head>
-<body<?php if (!empty($showSentToast)): ?> data-sent="1"<?php endif; ?><?php if (!empty($showAddedToast)): ?> data-added="1"<?php endif; ?><?php if (!empty($addError)): ?> data-add-error="1"<?php endif; ?><?php if (!empty($showSendErrorToast)): ?> data-send-error="1"<?php endif; ?>>
+<body<?php if (!empty($showSentToast)): ?> data-sent="1"<?php endif; ?><?php if (!empty($showSentHeadToast)): ?> data-sent-head="1" data-sent-head-count="<?= (int)$showSentHeadCount ?>"<?php endif; ?><?php if (!empty($showAddedToast)): ?> data-added="1"<?php endif; ?><?php if (!empty($addError)): ?> data-add-error="1"<?php endif; ?><?php if (!empty($showSendErrorToast)): ?> data-send-error="1"<?php endif; ?><?php if ($sendErrorDetail !== ''): ?> data-send-error-detail="<?= htmlspecialchars($sendErrorDetail) ?>"<?php endif; ?>>
     <div class="dashboard-container">
         <?php include __DIR__ . '/_sidebar_super_admin.php'; ?>
 
@@ -621,6 +698,7 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
                             <?php foreach ($endorsementDepartments as $d): ?>
                             <option
                                 value="<?= htmlspecialchars($d['head']) ?>"
+                                data-office-id="<?= htmlspecialchars($d['id']) ?>"
                                 data-head="<?= htmlspecialchars($d['head']) ?>"
                                 <?= $d['head'] === '' ? 'disabled' : '' ?>
                             >
@@ -640,8 +718,9 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
     </div>
 
     <form method="post" action="documents.php" id="send-admin-form" style="display:none;">
-        <input type="hidden" name="action" value="send_to_admin">
+        <input type="hidden" name="action" id="send-admin-action" value="send_to_admin">
         <input type="hidden" name="document_id" id="send-admin-doc-id" value="">
+        <input type="hidden" name="office_id" id="send-admin-office-id" value="">
         <input type="hidden" name="stamp_image_data" id="send-admin-stamp-image-data" value="">
         <input type="hidden" name="stamp_width_pct" id="send-admin-width" value="18">
         <input type="hidden" name="stamp_x_pct" id="send-admin-x" value="82">
@@ -735,6 +814,15 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
             document.body.appendChild(toast);
             setTimeout(function() { toast.remove(); }, 4000);
         }
+        if (document.body.getAttribute('data-sent-head') === '1') {
+            var sentHeadCount = parseInt(document.body.getAttribute('data-sent-head-count') || '0', 10) || 0;
+            var sentHeadToast = document.createElement('div');
+            sentHeadToast.setAttribute('role', 'status');
+            sentHeadToast.textContent = sentHeadCount === 1 ? 'Document sent to 1 department head.' : 'Document sent to ' + sentHeadCount + ' department heads.';
+            sentHeadToast.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:1600;padding:0.75rem 1.25rem;background:#22c55e;color:#fff;border-radius:10px;font-size:14px;font-weight:500;box-shadow:0 4px 14px rgba(0,0,0,0.15);';
+            document.body.appendChild(sentHeadToast);
+            setTimeout(function() { sentHeadToast.remove(); }, 4200);
+        }
 
         if (document.body.getAttribute('data-added') === '1') {
             var toast = document.createElement('div');
@@ -745,12 +833,15 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
             setTimeout(function() { toast.remove(); }, 4000);
         }
         if (document.body.getAttribute('data-send-error') === '1') {
+            var errDetail = document.body.getAttribute('data-send-error-detail') || '';
+            var errMsg = 'Could not send document.';
+            if (errDetail) errMsg += ' ' + errDetail;
             var errToast = document.createElement('div');
             errToast.setAttribute('role', 'status');
-            errToast.textContent = 'Could not send document. Try again.';
-            errToast.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:1600;padding:0.75rem 1.25rem;background:#ef4444;color:#fff;border-radius:10px;font-size:14px;font-weight:500;box-shadow:0 4px 14px rgba(0,0,0,0.15);';
+            errToast.textContent = errMsg;
+            errToast.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:1600;padding:0.75rem 1.25rem;background:#ef4444;color:#fff;border-radius:10px;font-size:14px;font-weight:500;box-shadow:0 4px 14px rgba(0,0,0,0.15);max-width:480px;';
             document.body.appendChild(errToast);
-            setTimeout(function() { errToast.remove(); }, 4500);
+            setTimeout(function() { errToast.remove(); }, 6000);
         }
 
         if (addModal && document.body.getAttribute('data-add-error') === '1') {
@@ -788,6 +879,8 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
         var sendAdminForm = document.getElementById('send-admin-form');
         var sendAdminDocId = document.getElementById('send-admin-doc-id');
         var sendAdminStampImageData = document.getElementById('send-admin-stamp-image-data');
+        var sendAdminAction = document.getElementById('send-admin-action');
+        var sendAdminOfficeId = document.getElementById('send-admin-office-id');
         var sendAdminWidth = document.getElementById('send-admin-width');
         var sendAdminX = document.getElementById('send-admin-x');
         var sendAdminY = document.getElementById('send-admin-y');
@@ -988,6 +1081,9 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
                 btn.classList.toggle('active', btn.getAttribute('data-stamp-type') === activeStampType);
             });
             if (activeStampTypeLabel) activeStampTypeLabel.textContent = stampTypeLabel(activeStampType);
+            if (sendAdminSubmit) {
+                sendAdminSubmit.textContent = activeStampType === 'endorsement' ? 'Send to Department Head' : 'Send to Admin';
+            }
         }
 
         function refreshGeneratedStamp() {
@@ -1273,6 +1369,19 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
                 if (!generatedStampData) {
                     alert('Please choose a stamp type and click Apply first.');
                     return;
+                }
+                if (sendAdminAction) sendAdminAction.value = (activeStampType === 'endorsement') ? 'send_to_head' : 'send_to_admin';
+                if (sendAdminOfficeId) sendAdminOfficeId.value = '';
+                if (activeStampType === 'endorsement') {
+                    var selectedOpt = stampToInput && stampToInput.options && stampToInput.selectedIndex >= 0
+                        ? stampToInput.options[stampToInput.selectedIndex]
+                        : null;
+                    var selectedOfficeId = selectedOpt ? (selectedOpt.getAttribute('data-office-id') || '') : '';
+                    if (!selectedOfficeId) {
+                        alert('Please select a department with an assigned head.');
+                        return;
+                    }
+                    if (sendAdminOfficeId) sendAdminOfficeId.value = selectedOfficeId;
                 }
                 sendAdminWidth.value = String(sendStampCfg.width.toFixed(2));
                 sendAdminX.value = String(sendStampCfg.x.toFixed(2));
