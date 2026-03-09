@@ -28,7 +28,23 @@ $notifItems = isset($notifItems) && is_array($notifItems) ? $notifItems : [];
         color: #111827;
         border-bottom: 1px solid #eef2f7;
         background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
     }
+    .notif-dropdown-fb .notif-mark-all-btn {
+        border: 0;
+        background: #e7f3ff;
+        color: #1877f2;
+        font-size: 0.75rem;
+        font-weight: 700;
+        border-radius: 999px;
+        padding: 6px 10px;
+        cursor: pointer;
+        font-family: inherit;
+    }
+    .notif-dropdown-fb .notif-mark-all-btn:hover { background: #dbeafe; }
     .notif-dropdown-fb .notif-dropdown-list { max-height: 410px; overflow-y: auto; padding: 8px; }
     .notif-dropdown-fb .notif-item-link {
         display: flex;
@@ -109,7 +125,12 @@ $notifItems = isset($notifItems) && is_array($notifItems) ? $notifItems : [];
     <span class="notif-badge" id="notif-count" aria-hidden="true" style="<?= $notifCount === 0 ? 'display:none' : '' ?>"><?= $notifCount ?></span>
 </button>
 <div class="notif-dropdown notif-dropdown-fb" id="notif-dropdown" aria-hidden="true" data-expanded="0">
-    <div class="notif-dropdown-head">Notifications</div>
+    <div class="notif-dropdown-head">
+        <span>Notifications</span>
+        <?php if (count($notifItems) > 0): ?>
+        <button type="button" class="notif-mark-all-btn" data-notif-mark-all>Mark all as read</button>
+        <?php endif; ?>
+    </div>
     <div class="notif-dropdown-list">
     <?php if (count($notifItems) === 0): ?>
         <div class="notif-empty">No new notifications</div>
@@ -120,12 +141,11 @@ $notifItems = isset($notifItems) && is_array($notifItems) ? $notifItems : [];
             $senderInitial = mb_strtoupper(mb_substr($sender, 0, 1));
             $docTitle = trim((string)($ni['documentTitle'] ?? 'Document'));
             if ($docTitle === '') $docTitle = 'Document';
-            $notifHref = !empty($ni['documentId']) ? ('../Admin Side/documents.php?highlight=' . urlencode((string)$ni['documentId'])) : '../Admin Side/documents.php';
+            $notifHref = !empty($ni['documentId']) ? ('department_documents.php?highlight=' . urlencode((string)$ni['documentId'])) : 'department_documents.php';
             $isExtra = $idx >= 4;
             $notifId = trim((string)($ni['notificationId'] ?? ''));
-            $isRead = !empty($ni['isRead']);
         ?>
-        <a href="<?= htmlspecialchars($notifHref) ?>" class="notif-item notif-item-link<?= $isExtra ? ' notif-extra' : '' ?><?= $isRead ? ' notif-read' : '' ?>" data-notif-id="<?= htmlspecialchars($notifId) ?>">
+        <a href="<?= htmlspecialchars($notifHref) ?>" class="notif-item notif-item-link<?= $isExtra ? ' notif-extra' : '' ?>" data-notif-id="<?= htmlspecialchars($notifId) ?>">
             <span class="notif-avatar"><?= htmlspecialchars($senderInitial) ?></span>
             <span class="notif-item-content">
                 <span class="notif-item-text"><strong><?= htmlspecialchars($sender) ?></strong> sent <strong><?= htmlspecialchars($docTitle) ?></strong></span>

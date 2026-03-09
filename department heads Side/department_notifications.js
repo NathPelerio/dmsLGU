@@ -18,14 +18,13 @@
     }
     function renderItem(ni, isExtra) {
         var href = (ni.documentId && ni.documentId.length > 0)
-            ? ('../Admin Side/documents.php?highlight=' + encodeURIComponent(ni.documentId))
-            : '../Admin Side/documents.php';
+            ? ('department_documents.php?highlight=' + encodeURIComponent(ni.documentId))
+            : 'department_documents.php';
         var sender = (ni.sentByUserName || '').trim() || 'System';
         var title = (ni.documentTitle || '').trim() || 'Document';
         var sentAt = (ni.sentAtFormatted || '').trim();
         var notifId = (ni.notificationId || '').trim();
-        var isRead = !!ni.isRead;
-        return '<a href="' + href + '" class="notif-item notif-item-link' + (isExtra ? ' notif-extra' : '') + (isRead ? ' notif-read' : '') + '" data-notif-id="' + escapeHtml(notifId) + '">'
+        return '<a href="' + href + '" class="notif-item notif-item-link' + (isExtra ? ' notif-extra' : '') + '" data-notif-id="' + escapeHtml(notifId) + '">'
             + '<span class="notif-avatar">' + escapeHtml(getSenderInitial(sender)) + '</span>'
             + '<span class="notif-item-content">'
             + '<span class="notif-item-text"><strong>' + escapeHtml(sender) + '</strong> sent <strong>' + escapeHtml(title) + '</strong></span>'
@@ -36,7 +35,11 @@
     }
     function renderNotifications(items, expanded) {
         var previewLimit = 4;
-        var html = '<div class="notif-dropdown-head">Notifications</div><div class="notif-dropdown-list">';
+        var html = '<div class="notif-dropdown-head">Notifications';
+        if (items.length > 0) {
+            html += '<button type="button" class="notif-mark-all-btn" data-notif-mark-all>Mark all as read</button>';
+        }
+        html += '</div><div class="notif-dropdown-list">';
         if (items.length === 0) {
             html += '<div class="notif-empty">No new notifications</div>';
         } else {
@@ -83,6 +86,26 @@
             if (data && typeof data.count !== 'undefined') {
                 updateBadgeCount(data.count);
             }
+            if (data && Array.isArray(data.items)) {
+                updateNotifUI(data);
+            }
+            return data;
+        }).catch(function() {
+            return null;
+        });
+    }
+    function markAllNotificationsRead() {
+        var body = 'action=mark_all_read';
+        return fetch('api_notifications.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+            body: body
+        }).then(function(res) {
+            return res.json();
+        }).then(function(data) {
+            if (data) {
+                updateNotifUI(data);
+            }
             return data;
         }).catch(function() {
             return null;
@@ -116,15 +139,24 @@
     });
 
     document.addEventListener('click', function(e) {
+        var markAllBtn = e.target && e.target.closest ? e.target.closest('[data-notif-mark-all]') : null;
+        if (markAllBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            markAllNotificationsRead();
+            return;
+        }
+    });
+
+    document.addEventListener('click', function(e) {
         var link = e.target && e.target.closest ? e.target.closest('.notif-item-link[data-notif-id]') : null;
         if (!link) return;
         var notifId = (link.getAttribute('data-notif-id') || '').trim();
-        if (!notifId || link.classList.contains('notif-read')) return;
+        if (!notifId) return;
 
         if (e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
             e.preventDefault();
-            var href = link.getAttribute('href') || '../Admin Side/documents.php';
-            link.classList.add('notif-read');
+            var href = link.getAttribute('href') || 'department_documents.php';
             markNotificationRead(notifId).finally(function() {
                 window.location.href = href;
             });

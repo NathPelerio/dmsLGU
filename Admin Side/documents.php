@@ -129,7 +129,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $officeIds = isset($_POST['office_id']) ? (is_array($_POST['office_id']) ? $_POST['office_id'] : [$_POST['office_id']]) : [];
     $officeIds = array_filter(array_map('trim', $officeIds));
     $officeIds = array_values(array_unique($officeIds));
-    if (preg_match('/^[a-f0-9]{24}$/i', $docId) && count($officeIds) > 0) {
+    if ($docId !== '' && count($officeIds) > 0) {
         try {
             $pdo = dbPdo($config);
             $docStmt = $pdo->prepare('SELECT id FROM documents WHERE id = :id LIMIT 1');
@@ -143,28 +143,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         (:document_id, :office_id, :office_name, :office_head_id, :office_head_name, :sent_at, :sent_by_user_id, :sent_by_user_name)'
                 );
                 foreach ($officeIds as $officeId) {
-                    if (!preg_match('/^[a-f0-9]{24}$/i', $officeId)) continue;
                     $officeStmt = $pdo->prepare('SELECT * FROM offices WHERE id = :id LIMIT 1');
                     $officeStmt->execute([':id' => $officeId]);
                     $office = $officeStmt->fetch();
-                    if ($office) {
-                        $officeHeadId = $office['office_head_id'] ?? '';
-                        $officeHeadName = $office['office_head'] ?? '';
-                        $officeName = $office['office_name'] ?? $office['office_code'] ?? 'Department';
-                        if ($officeHeadId !== '' || $officeHeadName !== '') {
-                            $ins->execute([
-                                ':document_id' => $docId,
-                                ':office_id' => $officeId,
-                                ':office_name' => $officeName,
-                                ':office_head_id' => $officeHeadId,
-                                ':office_head_name' => $officeHeadName,
-                                ':sent_at' => dbNowUtcString(),
-                                ':sent_by_user_id' => $_SESSION['user_id'] ?? '',
-                                ':sent_by_user_name' => $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User',
-                            ]);
-                            $sentCount++;
-                        }
-                    }
+                    if (!$office) continue;
+
+                    $rawHeadId = $office['office_head_id'] ?? null;
+                    $officeHeadId = ($rawHeadId !== null && (string)$rawHeadId !== '') ? $rawHeadId : null;
+                    $officeHeadName = trim((string)($office['office_head'] ?? ''));
+                    $officeName = trim((string)($office['office_name'] ?? $office['office_code'] ?? 'Department'));
+                    if ($officeHeadId === null && $officeHeadName === '') continue;
+
+                    $rawUserId = $_SESSION['user_id'] ?? null;
+                    $sentByUserId = ($rawUserId !== null && (string)$rawUserId !== '') ? $rawUserId : null;
+
+                    $ins->execute([
+                        ':document_id' => $docId,
+                        ':office_id' => $officeId,
+                        ':office_name' => $officeName,
+                        ':office_head_id' => $officeHeadId,
+                        ':office_head_name' => $officeHeadName,
+                        ':sent_at' => dbNowUtcString(),
+                        ':sent_by_user_id' => $sentByUserId,
+                        ':sent_by_user_name' => $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User',
+                    ]);
+                    $sentCount++;
                 }
                 if ($sentCount > 0) {
                     activityLog($config, 'document_send_to_department_heads', [
@@ -176,7 +179,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     exit;
                 }
             }
-        } catch (Exception $e) {}
+        } catch (Exception $e) {
+            error_log('[send_to_head] ' . $e->getMessage());
+        }
     }
     header('Location: documents.php?send_error=1');
     exit;
