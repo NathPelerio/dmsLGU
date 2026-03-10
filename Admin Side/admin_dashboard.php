@@ -66,9 +66,9 @@ try {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin – Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="admin-dashboard.css">
-    <link rel="stylesheet" href="admin-offices.css">
-    <link rel="stylesheet" href="profile_modal_admin.css">
+    <link rel="stylesheet" href="assets/css/admin-dashboard.css">
+    <link rel="stylesheet" href="assets/css/admin-offices.css">
+    <link rel="stylesheet" href="assets/css/profile_modal_admin.css">
     <style>
     body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
     .dashboard-container { display: flex; min-height: 100vh; border-top: 3px solid #D4AF37; }
@@ -294,7 +294,7 @@ try {
     </div>
 
     <?php include __DIR__ . '/_profile_modal_admin.php'; ?>
-    <script src="sidebar_admin.js"></script>
+    <script src="assets/js/sidebar_admin.js"></script>
     <script>
     (function() {
         function updateSubtitle() {

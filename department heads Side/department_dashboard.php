@@ -81,9 +81,9 @@ try {
     <title>DMS LGU - Department Head Dashboard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="../Super%20Admin%20Side/styles.css">
-    <link rel="stylesheet" href="../Admin%20Side/admin-dashboard.css">
-    <link rel="stylesheet" href="../Super%20Admin%20Side/sidebar_super_admin.css">
+    <link rel="stylesheet" href="../Super%20Admin%20Side/assets/css/styles.css">
+    <link rel="stylesheet" href="../Admin%20Side/assets/css/admin-dashboard.css">
+    <link rel="stylesheet" href="../Super%20Admin%20Side/assets/css/sidebar_super_admin.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         body, .dashboard-container, .main-content {
@@ -251,8 +251,8 @@ try {
         </div>
     </div>
 
-    <script src="../Super%20Admin%20Side/sidebar_super_admin.js"></script>
-    <script src="department_notifications.js"></script>
+    <script src="../Super%20Admin%20Side/assets/js/sidebar_super_admin.js"></script>
+    <script src="assets/js/department_notifications.js"></script>
     <script>
     (function() {
         function updateSubtitle() {

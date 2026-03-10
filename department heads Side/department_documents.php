@@ -139,7 +139,8 @@ try {
             d.document_code,
             d.document_title,
             d.file_name,
-            d.status
+            d.status,
+            d.notes
          FROM sent_to_department_heads sth
          INNER JOIN documents d ON d.id = sth.document_id
          WHERE
@@ -187,6 +188,107 @@ $selectedExt = strtolower((string)pathinfo($selectedFileName, PATHINFO_EXTENSION
 $isSelectedImage = in_array($selectedExt, ['jpg', 'jpeg', 'png', 'gif', 'webp'], true);
 $isSelectedPdf = ($selectedExt === 'pdf');
 $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
+$superAdminNote = trim((string)($selectedDocument['notes'] ?? ''));
+
+$progressEvents = [];
+$currentHolderLabel = 'No holder yet';
+if ($isViewMode && preg_match('/^[a-f0-9]{24}$/i', $selectedDocumentId)) {
+    try {
+        $pdo = dbPdo($config);
+
+        // Mark routed entries as read once the department head opens the document.
+        $markReadStmt = $pdo->prepare(
+            'UPDATE sent_to_department_heads sth
+             SET sth.read_at = COALESCE(sth.read_at, :read_at)
+             WHERE sth.document_id = :document_id
+               AND (
+                    sth.office_head_id = :user_id
+                    OR (
+                        sth.office_head_id IS NULL
+                        AND (
+                            LOWER(TRIM(sth.office_head_name)) IN (:head_name_1, :head_name_2, :head_name_3)
+                            OR (:user_department_check <> \'\' AND LOWER(TRIM(sth.office_name)) = LOWER(TRIM(:user_department_value)))
+                        )
+                    )
+               )'
+        );
+        $markReadStmt->execute([
+            ':read_at' => dbNowUtcString(),
+            ':document_id' => $selectedDocumentId,
+            ':user_id' => $currentUserId,
+            ':head_name_1' => $headName1,
+            ':head_name_2' => $headName2,
+            ':head_name_3' => $headName3,
+            ':user_department_check' => $currentUserDepartment,
+            ':user_department_value' => $currentUserDepartment,
+        ]);
+
+        $routeStmt = $pdo->prepare(
+            'SELECT
+                sth.office_name,
+                sth.sent_by_user_name,
+                sth.sent_at,
+                sth.read_at
+             FROM sent_to_department_heads sth
+             WHERE sth.document_id = :document_id
+             ORDER BY sth.sent_at ASC, sth.id ASC'
+        );
+        $routeStmt->execute([':document_id' => $selectedDocumentId]);
+        $routeRows = $routeStmt->fetchAll() ?: [];
+        foreach ($routeRows as $row) {
+            $deptName = trim((string)($row['office_name'] ?? 'Unknown Department'));
+            $progressEvents[] = [
+                'department' => ($deptName !== '' ? $deptName : 'Unknown Department'),
+                'action' => 'routed',
+                'received_at' => (string)($row['sent_at'] ?? ''),
+                'processed_at' => (string)($row['read_at'] ?? ''),
+                'notes' => 'Sent by ' . trim((string)($row['sent_by_user_name'] ?? 'User')),
+            ];
+        }
+
+        // If custom progress table exists, include manual/explicit department progress logs.
+        $hasProgressTable = false;
+        $tableCheck = $pdo->query("SHOW TABLES LIKE 'document_progress'");
+        if ($tableCheck && $tableCheck->fetch()) {
+            $hasProgressTable = true;
+        }
+        if ($hasProgressTable) {
+            $dpStmt = $pdo->prepare(
+                'SELECT department, action, received_at, processed_at, notes
+                 FROM document_progress
+                 WHERE document_id = :document_id
+                 ORDER BY received_at ASC, id ASC'
+            );
+            $dpStmt->execute([':document_id' => $selectedDocumentId]);
+            $dpRows = $dpStmt->fetchAll() ?: [];
+            foreach ($dpRows as $row) {
+                $deptName = trim((string)($row['department'] ?? 'Unknown Department'));
+                $progressEvents[] = [
+                    'department' => ($deptName !== '' ? $deptName : 'Unknown Department'),
+                    'action' => trim((string)($row['action'] ?? 'received')),
+                    'received_at' => (string)($row['received_at'] ?? ''),
+                    'processed_at' => (string)($row['processed_at'] ?? ''),
+                    'notes' => trim((string)($row['notes'] ?? '')),
+                ];
+            }
+        }
+
+        usort($progressEvents, static function ($a, $b) {
+            $timeA = strtotime((string)($a['received_at'] ?? '')) ?: 0;
+            $timeB = strtotime((string)($b['received_at'] ?? '')) ?: 0;
+            return $timeA <=> $timeB;
+        });
+
+        if (!empty($progressEvents)) {
+            $latest = $progressEvents[count($progressEvents) - 1];
+            $latestDepartment = trim((string)($latest['department'] ?? ''));
+            $latestAction = trim((string)($latest['action'] ?? 'received'));
+            $currentHolderLabel = ($latestDepartment !== '' ? $latestDepartment : 'Unknown Department') . ' (' . $latestAction . ')';
+        }
+    } catch (Exception $e) {
+        error_log('[department_documents progress] ' . $e->getMessage());
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -195,8 +297,8 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
     <title>DMS LGU - Department Documents</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="../Super%20Admin%20Side/sidebar_super_admin.css">
-    <link rel="stylesheet" href="../Admin%20Side/admin-dashboard.css">
+    <link rel="stylesheet" href="../Super%20Admin%20Side/assets/css/sidebar_super_admin.css">
+    <link rel="stylesheet" href="../Admin%20Side/assets/css/admin-dashboard.css">
     <style>
         body, .dashboard-container, .main-content {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Open Sans', sans-serif;
@@ -350,6 +452,27 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
             padding: 14px 16px; border-bottom: 1px solid #e2e8f0;
             font-size: 0.92rem; font-weight: 700; color: #0f172a;
         }
+        .superadmin-note-box {
+            margin: 12px 14px 0;
+            border: 1px solid #fde68a;
+            background: #fffbeb;
+            border-radius: 10px;
+            padding: 10px 11px;
+        }
+        .superadmin-note-label {
+            font-size: 0.7rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: #92400e;
+            font-weight: 800;
+            margin-bottom: 5px;
+        }
+        .superadmin-note-text {
+            font-size: 0.82rem;
+            color: #78350f;
+            line-height: 1.45;
+            white-space: pre-wrap;
+        }
         .comments-list {
             flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px;
             display: flex; flex-direction: column; gap: 10px;
@@ -435,6 +558,169 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
         }
         .comment-send:hover { background: #1d4ed8; }
         .comment-send svg { width: 18px; height: 18px; }
+        .view-progress-btn {
+            border-color: #fcd34d;
+            color: #92400e;
+            background: #fffbeb;
+        }
+        .view-progress-btn:hover { background: #fef3c7; }
+        .progress-offcanvas-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.35);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s ease, visibility 0.2s ease;
+            z-index: 2147483000;
+        }
+        .progress-offcanvas {
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: min(420px, 95vw);
+            height: 100vh;
+            background: #f8fafc;
+            border-left: 1px solid #dbe3ef;
+            box-shadow: -18px 0 36px rgba(15, 23, 42, 0.18);
+            transform: translateX(104%);
+            transition: transform 0.24s ease;
+            z-index: 2147483001;
+            display: flex;
+            flex-direction: column;
+            isolation: isolate;
+        }
+        .progress-offcanvas.open { transform: translateX(0); }
+        .progress-offcanvas-backdrop.open {
+            opacity: 1;
+            visibility: visible;
+        }
+        .progress-offcanvas-head {
+            padding: 14px 16px;
+            border-bottom: 1px solid #e2e8f0;
+            background: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .progress-offcanvas-title {
+            margin: 0;
+            font-size: 0.96rem;
+            font-weight: 700;
+            color: #0f172a;
+        }
+        .progress-offcanvas-sub {
+            margin: 2px 0 0;
+            font-size: 0.74rem;
+            color: #64748b;
+        }
+        .progress-close-btn {
+            border: none;
+            background: #e2e8f0;
+            color: #334155;
+            width: 30px;
+            height: 30px;
+            border-radius: 999px;
+            cursor: pointer;
+            font-size: 1rem;
+            line-height: 1;
+        }
+        .progress-close-btn:hover { background: #cbd5e1; }
+        .progress-offcanvas-body {
+            padding: 14px 16px 18px;
+            overflow-y: auto;
+            flex: 1;
+        }
+        .progress-current-holder {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 6px 10px;
+            border: 1px solid #cbd5e1;
+            background: #fff;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            color: #0f172a;
+            margin-bottom: 12px;
+        }
+        .progress-timeline {
+            position: relative;
+            margin: 0;
+            padding: 0 0 0 28px;
+            list-style: none;
+        }
+        .progress-timeline::before {
+            content: '';
+            position: absolute;
+            left: 11px;
+            top: 2px;
+            bottom: 2px;
+            width: 2px;
+            background: #cbd5e1;
+        }
+        .progress-item {
+            position: relative;
+            margin-bottom: 12px;
+        }
+        .progress-item:last-child { margin-bottom: 0; }
+        .progress-dot {
+            position: absolute;
+            left: -21px;
+            top: 6px;
+            width: 12px;
+            height: 12px;
+            border-radius: 999px;
+            background: #2563eb;
+            border: 2px solid #fff;
+            box-shadow: 0 0 0 1px #93c5fd;
+        }
+        .progress-card {
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 9px 10px;
+        }
+        .progress-item-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+        .progress-item-dept {
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: #0f172a;
+        }
+        .progress-item-action {
+            font-size: 0.72rem;
+            color: #1d4ed8;
+            background: #dbeafe;
+            border-radius: 999px;
+            padding: 2px 8px;
+            text-transform: capitalize;
+        }
+        .progress-meta {
+            font-size: 0.74rem;
+            color: #475569;
+            margin: 2px 0;
+        }
+        .progress-note {
+            margin-top: 5px;
+            font-size: 0.74rem;
+            color: #334155;
+            background: #f8fafc;
+            border-radius: 8px;
+            padding: 5px 7px;
+        }
+        .progress-empty {
+            font-size: 0.8rem;
+            color: #64748b;
+            background: #fff;
+            border: 1px dashed #cbd5e1;
+            border-radius: 8px;
+            padding: 10px;
+        }
 
         @media (max-width: 900px) {
             .detail-layout { grid-template-columns: 1fr; height: auto; overflow: visible; }
@@ -539,6 +825,10 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                                     Download
                                 </a>
+                                <button type="button" class="toolbar-btn view-progress-btn" id="open-progress-btn">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                                    View Progress
+                                </button>
                             </div>
                             <div class="detail-viewer">
                                 <?php if ($isSelectedImage): ?>
@@ -559,6 +849,10 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
 
                         <div class="detail-right">
                             <div class="comments-header">Comments &amp; Notes</div>
+                            <div class="superadmin-note-box">
+                                <div class="superadmin-note-label">Super Admin Note</div>
+                                <div class="superadmin-note-text"><?php echo $superAdminNote !== '' ? nl2br(htmlspecialchars($superAdminNote)) : 'No note provided.'; ?></div>
+                            </div>
                             <div class="comments-list" id="comments-list">
                                 <?php if ($selectedDocument): ?>
                                 <div class="comment-item" data-author-role="admin">
@@ -611,6 +905,64 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
                             </div>
                         </div>
                     </div>
+                    <div class="progress-offcanvas-backdrop" id="progress-offcanvas-backdrop"></div>
+                    <aside class="progress-offcanvas" id="progress-offcanvas" aria-hidden="true">
+                        <div class="progress-offcanvas-head">
+                            <div>
+                                <h3 class="progress-offcanvas-title">Document Progress Tracker</h3>
+                                <p class="progress-offcanvas-sub">Track where and when this document moved.</p>
+                            </div>
+                            <button type="button" class="progress-close-btn" id="close-progress-btn" aria-label="Close progress tracker">&times;</button>
+                        </div>
+                        <div class="progress-offcanvas-body">
+                            <div class="progress-current-holder">
+                                <strong>Current Holder:</strong>
+                                <span><?php echo htmlspecialchars($currentHolderLabel); ?></span>
+                            </div>
+                            <?php if (!empty($progressEvents)): ?>
+                                <ol class="progress-timeline">
+                                    <?php foreach ($progressEvents as $event): ?>
+                                        <?php
+                                            $receivedAt = trim((string)($event['received_at'] ?? ''));
+                                            $processedAt = trim((string)($event['processed_at'] ?? ''));
+                                            $receivedDisplay = '—';
+                                            $processedDisplay = '—';
+                                            if ($receivedAt !== '') {
+                                                try {
+                                                    $dt = new DateTime($receivedAt);
+                                                    $dt->setTimezone(new DateTimeZone('Asia/Manila'));
+                                                    $receivedDisplay = $dt->format('M j, Y g:i A');
+                                                } catch (Exception $e) {}
+                                            }
+                                            if ($processedAt !== '') {
+                                                try {
+                                                    $dt2 = new DateTime($processedAt);
+                                                    $dt2->setTimezone(new DateTimeZone('Asia/Manila'));
+                                                    $processedDisplay = $dt2->format('M j, Y g:i A');
+                                                } catch (Exception $e) {}
+                                            }
+                                        ?>
+                                        <li class="progress-item">
+                                            <span class="progress-dot"></span>
+                                            <div class="progress-card">
+                                                <div class="progress-item-head">
+                                                    <span class="progress-item-dept"><?php echo htmlspecialchars((string)($event['department'] ?? '')); ?></span>
+                                                    <span class="progress-item-action"><?php echo htmlspecialchars((string)($event['action'] ?? '')); ?></span>
+                                                </div>
+                                                <div class="progress-meta"><strong>Received:</strong> <?php echo htmlspecialchars($receivedDisplay); ?></div>
+                                                <div class="progress-meta"><strong>Processed:</strong> <?php echo htmlspecialchars($processedDisplay); ?></div>
+                                                <?php if (trim((string)($event['notes'] ?? '')) !== ''): ?>
+                                                    <div class="progress-note"><?php echo htmlspecialchars((string)($event['notes'] ?? '')); ?></div>
+                                                <?php endif; ?>
+                                            </div>
+                                        </li>
+                                    <?php endforeach; ?>
+                                </ol>
+                            <?php else: ?>
+                                <div class="progress-empty">No progress events yet for this document.</div>
+                            <?php endif; ?>
+                        </div>
+                    </aside>
                 <?php endif; ?>
 
                 </div>
@@ -659,8 +1011,8 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
     </script>
     <?php endif; ?>
 
-    <script src="../Super%20Admin%20Side/sidebar_super_admin.js"></script>
-    <script src="department_notifications.js"></script>
+    <script src="../Super%20Admin%20Side/assets/js/sidebar_super_admin.js"></script>
+    <script src="assets/js/department_notifications.js"></script>
     <script>
     (function() {
         var highlightedDocId = <?php echo json_encode($highlightDocumentId); ?>;
@@ -723,6 +1075,45 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
                 }
             });
         }
+
+        var openProgressBtn = document.getElementById('open-progress-btn');
+        var closeProgressBtn = document.getElementById('close-progress-btn');
+        var progressOffcanvas = document.getElementById('progress-offcanvas');
+        var progressBackdrop = document.getElementById('progress-offcanvas-backdrop');
+        if (progressOffcanvas && progressOffcanvas.parentNode !== document.body) {
+            document.body.appendChild(progressOffcanvas);
+        }
+        if (progressBackdrop && progressBackdrop.parentNode !== document.body) {
+            document.body.appendChild(progressBackdrop);
+        }
+        function closeProgressPanel() {
+            if (!progressOffcanvas || !progressBackdrop) return;
+            progressOffcanvas.classList.remove('open');
+            progressBackdrop.classList.remove('open');
+            progressOffcanvas.setAttribute('aria-hidden', 'true');
+            document.body.style.overflow = '';
+        }
+        function openProgressPanel() {
+            if (!progressOffcanvas || !progressBackdrop) return;
+            progressOffcanvas.classList.add('open');
+            progressBackdrop.classList.add('open');
+            progressOffcanvas.setAttribute('aria-hidden', 'false');
+            document.body.style.overflow = 'hidden';
+        }
+        if (openProgressBtn) {
+            openProgressBtn.addEventListener('click', openProgressPanel);
+        }
+        if (closeProgressBtn) {
+            closeProgressBtn.addEventListener('click', closeProgressPanel);
+        }
+        if (progressBackdrop) {
+            progressBackdrop.addEventListener('click', closeProgressPanel);
+        }
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeProgressPanel();
+            }
+        });
 
         var commentInput = document.getElementById('comment-input');
         var commentSendBtn = document.getElementById('comment-send-btn');

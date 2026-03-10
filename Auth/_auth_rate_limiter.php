@@ -3,8 +3,8 @@
  * Authentication rate limiter (MySQL-backed).
  *
  * Rules:
- * - After each failed attempt: 15-second cooldown.
- * - After 5 failed attempts: 15-minute lock.
+ * - Every 3 failed attempts: 15-second cooldown.
+ * - At 5 failed attempts: 10-minute lock.
  */
 require_once dirname(__DIR__) . '/db.php';
 
@@ -56,7 +56,7 @@ if (!function_exists('authRateLimiterFail')) {
         $scope = strtolower(trim((string)$scope));
         $identifier = strtolower(trim((string)$identifier));
         if ($identifier === '') {
-            return ['blocked' => true, 'seconds_left' => 15, 'type' => 'short', 'attempts' => 1];
+            return ['blocked' => false, 'seconds_left' => 0, 'type' => 'none', 'attempts' => 0];
         }
 
         try {
@@ -71,6 +71,9 @@ if (!function_exists('authRateLimiterFail')) {
             if ($doc) {
                 $attempts = (int)($doc['attempts'] ?? 0);
                 $longUntil = (int)($doc['long_block_until'] ?? 0);
+                if ($longUntil > $now) {
+                    return ['blocked' => true, 'seconds_left' => $longUntil - $now, 'type' => 'long', 'attempts' => $attempts];
+                }
                 if ($longUntil > 0 && $longUntil <= $now) {
                     // Long lock expired; restart attempts fresh.
                     $attempts = 0;
@@ -78,15 +81,19 @@ if (!function_exists('authRateLimiterFail')) {
             }
 
             $attempts++;
-            $shortBlockUntil = $now + 15;
+            $shortBlockUntil = 0;
             $longBlockUntil = 0;
-            $type = 'short';
-            $seconds = 15;
+            $type = 'none';
+            $seconds = 0;
             if ($attempts >= 5) {
-                $longBlockUntil = $now + 900;
+                $longBlockUntil = $now + 600;
                 $type = 'long';
-                $seconds = 900;
+                $seconds = 600;
                 $attempts = 0; // reset after long lock starts
+            } elseif ($attempts % 3 === 0) {
+                $shortBlockUntil = $now + 15;
+                $type = 'short';
+                $seconds = 15;
             }
 
             $upsert = $pdo->prepare(
@@ -114,9 +121,9 @@ if (!function_exists('authRateLimiterFail')) {
                 ':updated_at' => dbNowUtcString(),
             ]);
 
-            return ['blocked' => true, 'seconds_left' => $seconds, 'type' => $type, 'attempts' => $attempts];
+            return ['blocked' => $seconds > 0, 'seconds_left' => $seconds, 'type' => $type, 'attempts' => $attempts];
         } catch (Exception $e) {
-            return ['blocked' => true, 'seconds_left' => 15, 'type' => 'short', 'attempts' => 1];
+            return ['blocked' => false, 'seconds_left' => 0, 'type' => 'none', 'attempts' => 0];
         }
     }
 }
@@ -141,12 +148,15 @@ if (!function_exists('authRateLimiterReset')) {
 
 if (!function_exists('authRateLimiterMessage')) {
     function authRateLimiterMessage($status) {
-        $seconds = max(1, (int)($status['seconds_left'] ?? 0));
+        $seconds = max(0, (int)($status['seconds_left'] ?? 0));
         $type = (string)($status['type'] ?? 'short');
         if ($type === 'long') {
             $minutes = (int)ceil($seconds / 60);
             return 'Too many failed attempts. Please wait ' . $minutes . ' minute(s) before trying again.';
         }
-        return 'Incorrect credentials. Please wait ' . $seconds . ' second(s) before trying again.';
+        if ($type === 'short' && $seconds > 0) {
+            return 'Incorrect credentials. Please wait ' . $seconds . ' second(s) before trying again.';
+        }
+        return 'Incorrect credentials.';
     }
 }

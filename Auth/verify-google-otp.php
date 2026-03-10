@@ -167,19 +167,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (!isset($_POST['action']) || $_POST
     $rateStatus = authRateLimiterStatus($config, $rateScope, $rateIdentifier, $clientIp);
     if (!empty($rateStatus['blocked'])) {
         $error = authRateLimiterMessage($rateStatus);
-        $rateLimitSeconds = max(1, (int)($rateStatus['seconds_left'] ?? 0));
+        $rateLimitSeconds = max(0, (int)($rateStatus['seconds_left'] ?? 0));
         $rateLimitType = (string)($rateStatus['type'] ?? '');
     } elseif (!preg_match('/^\d{6}$/', $otpInput)) {
         $failStatus = authRateLimiterFail($config, $rateScope, $rateIdentifier, $clientIp);
         $error = authRateLimiterMessage($failStatus);
-        $rateLimitSeconds = max(1, (int)($failStatus['seconds_left'] ?? 0));
+        $rateLimitSeconds = max(0, (int)($failStatus['seconds_left'] ?? 0));
         $rateLimitType = (string)($failStatus['type'] ?? '');
     } elseif ($otpExpiresAt <= time()) {
         $error = 'Verification code expired. Please request a new code.';
     } elseif ($otpHash === '' || !password_verify($otpInput, $otpHash)) {
         $failStatus = authRateLimiterFail($config, $rateScope, $rateIdentifier, $clientIp);
         $error = authRateLimiterMessage($failStatus);
-        $rateLimitSeconds = max(1, (int)($failStatus['seconds_left'] ?? 0));
+        $rateLimitSeconds = max(0, (int)($failStatus['seconds_left'] ?? 0));
         $rateLimitType = (string)($failStatus['type'] ?? '');
     } else {
         authRateLimiterReset($config, $rateScope, $rateIdentifier, $clientIp);

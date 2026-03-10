@@ -475,9 +475,9 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin - Documents</title>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="admin-dashboard.css">
-    <link rel="stylesheet" href="admin-offices.css">
-    <link rel="stylesheet" href="profile_modal_admin.css">
+    <link rel="stylesheet" href="assets/css/admin-dashboard.css">
+    <link rel="stylesheet" href="assets/css/admin-offices.css">
+    <link rel="stylesheet" href="assets/css/profile_modal_admin.css">
     <style>
     body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
     .dashboard-container { display: flex; min-height: 100vh; border-top: 3px solid #D4AF37; }
@@ -946,7 +946,7 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
     <?php include __DIR__ . '/_profile_modal_admin.php'; ?>
     <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/docx-preview@0.3.0/dist/docx-preview.min.js"></script>
-    <script src="sidebar_admin.js"></script>
+    <script src="assets/js/sidebar_admin.js"></script>
     <script>
     (function() {
         var uploadedStampData = <?php echo json_encode($currentUserStamp); ?> || '';
@@ -1162,6 +1162,7 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
         var stampHeadPreview = document.getElementById('stamp-head-preview');
         var sendStampNode = null;
         var sendStampCfg = { width: 18, x: 82, y: 84, tilt: 0 };
+        var sendStampAwaitingPlacement = false;
         var activeStampType = 'approved';
         var generatedStampData = '';
 
@@ -1359,11 +1360,28 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
             }
         }
 
+        function getStampTargetElement(containerEl) {
+            if (!containerEl) return null;
+            // Keep sender/receiver coordinates anchored to the rendered DOCX page.
+            var page = containerEl.querySelector('.docx');
+            if (!page) page = containerEl.querySelector('.docx-wrapper');
+            if (!page) page = containerEl.firstElementChild;
+            if (!page) page = containerEl;
+            if (page && (!page.style.position || page.style.position === 'static')) {
+                page.style.position = 'relative';
+            }
+            return page;
+        }
+
         function getSendStampBounds() {
             if (!sendStampNode || !sendSuperAdminContainer) {
                 return { minX: 5, maxX: 95, minY: 5, maxY: 95 };
             }
-            var rect = sendSuperAdminContainer.getBoundingClientRect();
+            var targetEl = getStampTargetElement(sendSuperAdminContainer);
+            if (!targetEl) {
+                return { minX: 5, maxX: 95, minY: 5, maxY: 95 };
+            }
+            var rect = targetEl.getBoundingClientRect();
             if (!rect || rect.width <= 0 || rect.height <= 0) {
                 return { minX: 5, maxX: 95, minY: 5, maxY: 95 };
             }
@@ -1400,25 +1418,59 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
             if (sendSuperAdminTiltLabel) sendSuperAdminTiltLabel.textContent = Math.round(sendStampCfg.tilt) + '°';
         }
 
+        function updateSendStampPlacementCursor() {
+            if (!sendSuperAdminContainer) return;
+            sendSuperAdminContainer.style.cursor = sendStampAwaitingPlacement ? 'crosshair' : '';
+        }
+
         function ensureSendStampNode() {
             if (!sendSuperAdminContainer) return null;
             var src = generatedStampData;
             if (!src) return null;
+            var targetEl = getStampTargetElement(sendSuperAdminContainer);
+            if (!targetEl) return null;
             if (!sendStampNode) {
                 sendStampNode = document.createElement('img');
                 sendStampNode.className = 'send-stamp-overlay';
                 sendStampNode.alt = 'Stamp';
                 sendStampNode.src = src;
-                sendSuperAdminContainer.appendChild(sendStampNode);
+                targetEl.appendChild(sendStampNode);
+            } else if (sendStampNode.parentNode !== targetEl) {
+                targetEl.appendChild(sendStampNode);
             }
             return sendStampNode;
+        }
+
+        function clearSendStampNode() {
+            if (sendStampNode && sendStampNode.parentNode) {
+                sendStampNode.parentNode.removeChild(sendStampNode);
+            }
+            sendStampNode = null;
+        }
+
+        function placeSendStampAtClientPoint(clientX, clientY) {
+            if (!generatedStampData || !sendSuperAdminContainer) return false;
+            ensureSendStampNode();
+            if (!sendStampNode) return false;
+            var targetEl = getStampTargetElement(sendSuperAdminContainer);
+            if (!targetEl) return false;
+            var rect = targetEl.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return false;
+            sendStampCfg.x = ((clientX - rect.left) / rect.width) * 100;
+            sendStampCfg.y = ((clientY - rect.top) / rect.height) * 100;
+            applySendStampStyles();
+            sendStampAwaitingPlacement = false;
+            updateSendStampPlacementCursor();
+            return true;
         }
 
         function openSendSuperAdminModal(docId, docName) {
             if (!sendSuperAdminModal || !sendSuperAdminContainer) return;
             sendStampCfg = { width: 18, x: 82, y: 84, tilt: 0 };
             sendStampNode = null;
+            sendStampAwaitingPlacement = false;
             generatedStampData = '';
+            updateSendStampPlacementCursor();
             if (sendSuperAdminDocId) sendSuperAdminDocId.value = docId || '';
             if (sendSuperAdminStampImageData) sendSuperAdminStampImageData.value = '';
             activeStampType = 'approved';
@@ -1475,6 +1527,8 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
             if (sendSuperAdminLoading) sendSuperAdminLoading.style.display = 'block';
             if (sendSuperAdminError) sendSuperAdminError.style.display = 'none';
             sendStampNode = null;
+            sendStampAwaitingPlacement = false;
+            updateSendStampPlacementCursor();
             closeStampDetailModal();
         }
 
@@ -1508,8 +1562,9 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
                     return;
                 }
                 refreshGeneratedStamp();
-                ensureSendStampNode();
-                applySendStampStyles();
+                clearSendStampNode();
+                sendStampAwaitingPlacement = true;
+                updateSendStampPlacementCursor();
                 closeStampDetailModal();
             });
         }
@@ -1535,7 +1590,9 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
             var draggingStamp = false;
             function moveSendStamp(clientX, clientY) {
                 if (!sendStampNode || !sendSuperAdminContainer) return;
-                var rect = sendSuperAdminContainer.getBoundingClientRect();
+                var targetEl = getStampTargetElement(sendSuperAdminContainer);
+                if (!targetEl) return;
+                var rect = targetEl.getBoundingClientRect();
                 if (rect.width <= 0 || rect.height <= 0) return;
                 var bounds = getSendStampBounds();
                 sendStampCfg.x = clamp(((clientX - rect.left) / rect.width) * 100, bounds.minX, bounds.maxX);
@@ -1543,6 +1600,12 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
                 applySendStampStyles();
             }
             sendSuperAdminContainer.addEventListener('mousedown', function(e) {
+                if (sendStampAwaitingPlacement && generatedStampData) {
+                    if (placeSendStampAtClientPoint(e.clientX, e.clientY)) {
+                        e.preventDefault();
+                    }
+                    return;
+                }
                 if (!sendStampNode) return;
                 if (e.target === sendStampNode) {
                     draggingStamp = true;
@@ -1561,6 +1624,10 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
                 if (!sendSuperAdminForm || !sendSuperAdminDocId || !sendSuperAdminDocId.value) return;
                 if (!generatedStampData) {
                     alert('Please choose a stamp type and click Apply first.');
+                    return;
+                }
+                if (!sendStampNode || sendStampAwaitingPlacement) {
+                    alert('Please click on the document preview to place the stamp first.');
                     return;
                 }
                 sendSuperAdminWidth.value = String(sendStampCfg.width.toFixed(2));
@@ -1659,6 +1726,8 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
 
         function applyStampOverlay(stampCfg) {
             if (!documentViewContainer || !stampCfg || !stampCfg.image) return;
+            var targetEl = getStampTargetElement(documentViewContainer);
+            if (!targetEl) return;
             var stamp = document.createElement('img');
             stamp.className = 'send-stamp-overlay';
             stamp.style.pointerEvents = 'none';
@@ -1671,7 +1740,7 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
             stamp.style.width = width + '%';
             stamp.style.left = x + '%';
             stamp.style.top = y + '%';
-            documentViewContainer.appendChild(stamp);
+            targetEl.appendChild(stamp);
         }
 
         function openDocumentViewModal(docId, docName, stampCfg) {
