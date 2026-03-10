@@ -68,10 +68,10 @@ try {
     <title>DMS LGU – Super Admin Dashboard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css">
-    <link rel="stylesheet" href="profile_modal_super_admin.css">
-    <link rel="stylesheet" href="../Admin Side/admin-dashboard.css">
-    <link rel="stylesheet" href="sidebar_super_admin.css">
+    <link rel="stylesheet" href="assets/css/styles.css">
+    <link rel="stylesheet" href="assets/css/profile_modal_super_admin.css">
+    <link rel="stylesheet" href="../Admin%20Side/assets/css/admin-dashboard.css">
+    <link rel="stylesheet" href="assets/css/sidebar_super_admin.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         /* Same font as sidebar: Inter for full dashboard consistency */
@@ -242,9 +242,9 @@ try {
     </div>
 
     <?php include __DIR__ . '/_profile_modal_super_admin.php'; ?>
-    <script src="sidebar_super_admin.js"></script>
-    <?php $notifJsVer = @filemtime(__DIR__ . '/super_admin_notifications.js') ?: time(); ?>
-    <script src="super_admin_notifications.js?v=<?= (int)$notifJsVer ?>"></script>
+    <script src="assets/js/sidebar_super_admin.js"></script>
+    <?php $notifJsVer = @filemtime(__DIR__ . '/assets/js/super_admin_notifications.js') ?: time(); ?>
+    <script src="assets/js/super_admin_notifications.js?v=<?= (int)$notifJsVer ?>"></script>
     <script>
     (function() {
         function updateSubtitle() {

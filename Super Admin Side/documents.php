@@ -110,6 +110,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $stampX = max(5, min(95, (float)($_POST['stamp_x_pct'] ?? 82)));
     $stampY = max(5, min(95, (float)($_POST['stamp_y_pct'] ?? 84)));
     $postedStampImage = trim((string)($_POST['stamp_image_data'] ?? ''));
+    $postedNotes = trim((string)($_POST['notes'] ?? ''));
     if (!preg_match('/^[a-f0-9]{24}$/i', $sendId)) {
         header('Location: documents.php?send_error=1');
         exit;
@@ -154,6 +155,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 ':sent_by_user_name' => $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User',
                 ':sent_at' => dbNowUtcString(),
             ]);
+            if ($postedNotes !== '') {
+                $noteUp = $pdo->prepare('UPDATE documents SET notes = :notes, updated_at = :updated_at WHERE id = :id');
+                $noteUp->execute([':notes' => $postedNotes, ':updated_at' => dbNowUtcString(), ':id' => $sendId]);
+            }
             activityLog($config, 'document_send_to_admin', [
                 'module' => 'super_admin_documents',
                 'document_id' => $sendId,
@@ -171,6 +176,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 // Send document to Department Head from Super Admin.
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'send_to_head') {
     $docId = trim((string)($_POST['document_id'] ?? ''));
+    $postedNotes = trim((string)($_POST['notes'] ?? ''));
     $officeIds = isset($_POST['office_id']) ? (is_array($_POST['office_id']) ? $_POST['office_id'] : [$_POST['office_id']]) : [];
     $officeIds = array_filter(array_map('trim', $officeIds));
     $officeIds = array_values(array_unique($officeIds));
@@ -216,6 +222,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $sentCount++;
                 }
                 if ($sentCount > 0) {
+                    if ($postedNotes !== '') {
+                        $noteUp = $pdo->prepare('UPDATE documents SET notes = :notes, updated_at = :updated_at WHERE id = :id');
+                        $noteUp->execute([':notes' => $postedNotes, ':updated_at' => dbNowUtcString(), ':id' => $docId]);
+                    }
                     activityLog($config, 'document_send_to_department_heads', [
                         'module' => 'super_admin_documents',
                         'document_id' => $docId,
@@ -444,6 +454,97 @@ $showAddedToast = isset($_GET['added']) && $_GET['added'] === '1';
 $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
 $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
 
+$selectedDocumentId = trim((string)($_GET['doc'] ?? ''));
+$isViewMode = ($selectedDocumentId !== '' && preg_match('/^[a-f0-9]{24}$/i', $selectedDocumentId));
+$highlightDocumentId = trim((string)($_GET['highlight'] ?? ''));
+
+$selectedDocument = null;
+if ($isViewMode) {
+    foreach ($sentList as $row) {
+        if ((string)($row['documentId'] ?? '') === $selectedDocumentId) {
+            $selectedDocument = $row;
+            break;
+        }
+    }
+}
+
+$selectedFileName = (string)($selectedDocument['fileName'] ?? '');
+$selectedExt = strtolower((string)pathinfo($selectedFileName, PATHINFO_EXTENSION));
+$isSelectedImage = in_array($selectedExt, ['jpg', 'jpeg', 'png', 'gif', 'webp'], true);
+$isSelectedPdf = ($selectedExt === 'pdf');
+$isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
+
+$progressEvents = [];
+$currentHolderLabel = 'No holder yet';
+$superAdminNote = '';
+if ($isViewMode) {
+    try {
+        $pdo = dbPdo($config);
+        $noteStmt = $pdo->prepare('SELECT notes FROM documents WHERE id = :id LIMIT 1');
+        $noteStmt->execute([':id' => $selectedDocumentId]);
+        $noteRow = $noteStmt->fetch();
+        if ($noteRow) {
+            $superAdminNote = trim((string)($noteRow['notes'] ?? ''));
+        }
+        $routeStmt = $pdo->prepare(
+            'SELECT sth.office_name, sth.sent_by_user_name, sth.sent_at, sth.read_at
+             FROM sent_to_department_heads sth
+             WHERE sth.document_id = :document_id
+             ORDER BY sth.sent_at ASC, sth.id ASC'
+        );
+        $routeStmt->execute([':document_id' => $selectedDocumentId]);
+        $routeRows = $routeStmt->fetchAll() ?: [];
+        foreach ($routeRows as $row) {
+            $deptName = trim((string)($row['office_name'] ?? 'Unknown Department'));
+            $progressEvents[] = [
+                'department' => ($deptName !== '' ? $deptName : 'Unknown Department'),
+                'action' => 'routed',
+                'received_at' => (string)($row['sent_at'] ?? ''),
+                'processed_at' => (string)($row['read_at'] ?? ''),
+                'notes' => 'Sent by ' . trim((string)($row['sent_by_user_name'] ?? 'User')),
+            ];
+        }
+        $hasProgressTable = false;
+        $tableCheck = $pdo->query("SHOW TABLES LIKE 'document_progress'");
+        if ($tableCheck && $tableCheck->fetch()) {
+            $hasProgressTable = true;
+        }
+        if ($hasProgressTable) {
+            $dpStmt = $pdo->prepare(
+                'SELECT department, action, received_at, processed_at, notes
+                 FROM document_progress
+                 WHERE document_id = :document_id
+                 ORDER BY received_at ASC, id ASC'
+            );
+            $dpStmt->execute([':document_id' => $selectedDocumentId]);
+            $dpRows = $dpStmt->fetchAll() ?: [];
+            foreach ($dpRows as $row) {
+                $deptName = trim((string)($row['department'] ?? 'Unknown Department'));
+                $progressEvents[] = [
+                    'department' => ($deptName !== '' ? $deptName : 'Unknown Department'),
+                    'action' => trim((string)($row['action'] ?? 'received')),
+                    'received_at' => (string)($row['received_at'] ?? ''),
+                    'processed_at' => (string)($row['processed_at'] ?? ''),
+                    'notes' => trim((string)($row['notes'] ?? '')),
+                ];
+            }
+        }
+        usort($progressEvents, static function ($a, $b) {
+            $timeA = strtotime((string)($a['received_at'] ?? '')) ?: 0;
+            $timeB = strtotime((string)($b['received_at'] ?? '')) ?: 0;
+            return $timeA <=> $timeB;
+        });
+        if (!empty($progressEvents)) {
+            $latest = $progressEvents[count($progressEvents) - 1];
+            $latestDepartment = trim((string)($latest['department'] ?? ''));
+            $latestAction = trim((string)($latest['action'] ?? 'received'));
+            $currentHolderLabel = ($latestDepartment !== '' ? $latestDepartment : 'Unknown Department') . ' (' . $latestAction . ')';
+        }
+    } catch (Exception $e) {
+        error_log('[super_admin_documents progress] ' . $e->getMessage());
+    }
+}
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -452,11 +553,11 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
     <title>DMS LGU – Documents</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css">
-    <link rel="stylesheet" href="profile_modal_super_admin.css">
-    <link rel="stylesheet" href="../Admin Side/admin-dashboard.css">
-    <link rel="stylesheet" href="../Admin Side/admin-offices.css">
-    <link rel="stylesheet" href="sidebar_super_admin.css">
+    <link rel="stylesheet" href="assets/css/styles.css">
+    <link rel="stylesheet" href="assets/css/profile_modal_super_admin.css">
+    <link rel="stylesheet" href="../Admin%20Side/assets/css/admin-dashboard.css">
+    <link rel="stylesheet" href="../Admin%20Side/assets/css/admin-offices.css">
+    <link rel="stylesheet" href="assets/css/sidebar_super_admin.css">
     <style>
         body { margin: 0; background: #f8fafc; color: #0f172a; }
         .main-content { display: flex; flex-direction: column; flex: 1; min-height: 0; background: #fff; }
@@ -520,6 +621,225 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
             .stamp-adjust-wrap { flex-wrap: wrap; }
             .stamp-adjust-wrap label { width: 100%; }
         }
+
+        /* ── DETAIL VIEW (left viewer + right comments) ─────── */
+        .detail-layout {
+            display: grid;
+            grid-template-columns: 1fr 380px;
+            gap: 0;
+            align-items: start;
+            height: calc(100vh - 170px);
+            border: 1px solid #dbe3ef;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
+        }
+        .detail-left {
+            display: flex; flex-direction: column; background: #fff;
+            border-right: 1px solid #e2e8f0;
+            height: 100%; min-height: 0; overflow: auto;
+        }
+        .detail-toolbar {
+            padding: 10px 14px; border-bottom: 1px solid #e2e8f0;
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+            background: #fff; flex-shrink: 0;
+            position: sticky; top: 0; z-index: 4;
+        }
+        .detail-toolbar-btn {
+            border: 1px solid #dbe3ef; background: #fff; color: #1e293b;
+            border-radius: 8px; font-size: 0.82rem; padding: 7px 12px;
+            text-decoration: none; cursor: pointer; font-weight: 600;
+            display: inline-flex; align-items: center; gap: 5px;
+            transition: background 0.12s; font-family: inherit;
+        }
+        .detail-toolbar-btn:hover { background: #f1f5f9; }
+        .detail-toolbar-btn svg { width: 15px; height: 15px; }
+        .detail-toolbar-select {
+            border: 1px solid #dbe3ef; background: #fff; color: #1e293b;
+            border-radius: 8px; font-size: 0.82rem; padding: 7px 10px;
+            font-weight: 600; min-width: 210px; max-width: 280px;
+        }
+        .detail-toolbar-page-count {
+            margin-left: auto; font-size: 0.8rem; color: #475569;
+            font-weight: 700; background: #f8fafc; border: 1px solid #dbe3ef;
+            border-radius: 8px; padding: 7px 10px; white-space: nowrap;
+        }
+        .detail-toolbar-btn.btn-send-admin { border-color: #86efac; color: #047857; background: #f0fdf4; }
+        .detail-toolbar-btn.btn-send-admin:hover { background: #dcfce7; }
+        .detail-toolbar-btn.btn-send-head { border-color: #c4b5fd; color: #6d28d9; background: #f5f3ff; }
+        .detail-toolbar-btn.btn-send-head:hover { background: #ede9fe; }
+        .detail-toolbar-btn.btn-view-progress { border-color: #fcd34d; color: #92400e; background: #fffbeb; }
+        .detail-toolbar-btn.btn-view-progress:hover { background: #fef3c7; }
+        .detail-viewer {
+            background: #f1f5f9; padding: 16px; overflow: visible;
+            flex: 1; min-height: 0;
+        }
+        .viewer-image { max-width: 100%; max-height: 100%; border-radius: 6px; border: 1px solid #e2e8f0; background: #fff; }
+        .viewer-frame { width: 100%; min-height: 78vh; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; }
+        .viewer-fallback {
+            border: 1px dashed #94a3b8; border-radius: 10px; background: #fff;
+            padding: 24px; text-align: center; color: #475569; max-width: 420px;
+        }
+        .viewer-fallback p { margin: 0 0 10px; }
+        #detail-docx-container .docx-wrapper { background: #e2e8f0; padding: 18px 12px; }
+        #detail-docx-container .docx-wrapper > section.docx {
+            margin: 0 auto 18px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.14);
+            border: 1px solid #dbe3ef;
+        }
+        #detail-docx-container .docx-wrapper > section.docx:last-child { margin-bottom: 0; }
+
+        /* ── COMMENTS PANEL (right side) ──────────────── */
+        .detail-right {
+            display: flex; flex-direction: column; background: #fff;
+            height: 100%; min-height: 420px; overflow: hidden;
+        }
+        .comments-header {
+            padding: 14px 16px; border-bottom: 1px solid #e2e8f0;
+            font-size: 0.92rem; font-weight: 700; color: #0f172a;
+        }
+        .superadmin-note-box {
+            margin: 12px 14px 0;
+            border: 1px solid #fde68a;
+            background: #fffbeb;
+            border-radius: 10px;
+            padding: 10px 11px;
+        }
+        .superadmin-note-label {
+            font-size: 0.7rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: #92400e;
+            font-weight: 800;
+            margin-bottom: 5px;
+        }
+        .superadmin-note-text {
+            font-size: 0.82rem;
+            color: #78350f;
+            line-height: 1.45;
+            white-space: pre-wrap;
+        }
+        .comments-list {
+            flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px;
+            display: flex; flex-direction: column; gap: 10px;
+        }
+        .comment-item { display: flex; gap: 10px; align-items: flex-start; }
+        .comment-avatar {
+            width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.78rem; font-weight: 700; color: #fff;
+        }
+        .comment-avatar.sa { background: #1e40af; }
+        .comment-avatar.dh { background: #0f766e; }
+        .comment-body { flex: 1; min-width: 0; }
+        .comment-meta { display: flex; align-items: center; gap: 8px; }
+        .comment-name { font-size: 0.82rem; font-weight: 700; color: #0f172a; }
+        .comment-text {
+            margin-top: 3px; font-size: 0.84rem; color: #334155; line-height: 1.45;
+            background: #f1f5f9; border-radius: 10px; padding: 8px 10px;
+        }
+        .comment-time { font-size: 0.7rem; color: #94a3b8; margin-top: 3px; text-align: right; }
+        .comments-empty { padding: 20px; text-align: center; color: #94a3b8; font-size: 0.86rem; }
+        .comment-compose {
+            padding: 10px 14px; border-top: 1px solid #e2e8f0;
+            display: flex; gap: 8px; flex-shrink: 0;
+        }
+        .comment-input {
+            flex: 1; border: 1px solid #cbd5e1; border-radius: 10px;
+            padding: 10px 12px; font-size: 0.86rem; font-family: inherit;
+            outline: none; transition: border-color 0.15s;
+        }
+        .comment-input:focus { border-color: #93c5fd; }
+        .comment-send-btn {
+            border: none; background: #2563eb; color: #fff; border-radius: 10px;
+            padding: 0 16px; font-size: 0.84rem; font-weight: 700; cursor: pointer;
+            display: inline-flex; align-items: center; justify-content: center;
+            transition: background 0.15s;
+        }
+        .comment-send-btn:hover { background: #1d4ed8; }
+        .comment-send-btn svg { width: 18px; height: 18px; }
+
+        /* ── OFF-CANVAS PROGRESS TRACKER ──────────────── */
+        .progress-offcanvas-backdrop {
+            position: fixed; inset: 0;
+            background: rgba(15, 23, 42, 0.35);
+            opacity: 0; visibility: hidden;
+            transition: opacity 0.2s ease, visibility 0.2s ease;
+            z-index: 2147483000;
+        }
+        .progress-offcanvas-backdrop.open { opacity: 1; visibility: visible; }
+        .progress-offcanvas {
+            position: fixed; top: 0; right: 0;
+            width: min(420px, 95vw); height: 100vh;
+            background: #f8fafc; border-left: 1px solid #dbe3ef;
+            box-shadow: -18px 0 36px rgba(15, 23, 42, 0.18);
+            transform: translateX(104%);
+            transition: transform 0.24s ease;
+            z-index: 2147483001;
+            display: flex; flex-direction: column; isolation: isolate;
+        }
+        .progress-offcanvas.open { transform: translateX(0); }
+        .progress-offcanvas-head {
+            padding: 14px 16px; border-bottom: 1px solid #e2e8f0; background: #fff;
+            display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        }
+        .progress-offcanvas-title { margin: 0; font-size: 0.96rem; font-weight: 700; color: #0f172a; }
+        .progress-offcanvas-sub { margin: 2px 0 0; font-size: 0.74rem; color: #64748b; }
+        .progress-close-btn {
+            border: none; background: #e2e8f0; color: #334155;
+            width: 30px; height: 30px; border-radius: 999px;
+            cursor: pointer; font-size: 1rem; line-height: 1;
+        }
+        .progress-close-btn:hover { background: #cbd5e1; }
+        .progress-offcanvas-body { padding: 14px 16px 18px; overflow-y: auto; flex: 1; }
+        .progress-current-holder {
+            display: inline-flex; align-items: center; gap: 7px;
+            padding: 6px 10px; border: 1px solid #cbd5e1; background: #fff;
+            border-radius: 999px; font-size: 0.78rem; color: #0f172a; margin-bottom: 12px;
+        }
+        .progress-timeline {
+            position: relative; margin: 0; padding: 0 0 0 28px; list-style: none;
+        }
+        .progress-timeline::before {
+            content: ''; position: absolute; left: 11px; top: 2px; bottom: 2px;
+            width: 2px; background: #cbd5e1;
+        }
+        .progress-item { position: relative; margin-bottom: 12px; }
+        .progress-item:last-child { margin-bottom: 0; }
+        .progress-dot {
+            position: absolute; left: -21px; top: 6px;
+            width: 12px; height: 12px; border-radius: 999px;
+            background: #2563eb; border: 2px solid #fff; box-shadow: 0 0 0 1px #93c5fd;
+        }
+        .progress-card {
+            background: #fff; border: 1px solid #e2e8f0;
+            border-radius: 10px; padding: 9px 10px;
+        }
+        .progress-item-head {
+            display: flex; align-items: baseline; justify-content: space-between;
+            gap: 8px; margin-bottom: 4px;
+        }
+        .progress-item-dept { font-size: 0.82rem; font-weight: 700; color: #0f172a; }
+        .progress-item-action {
+            font-size: 0.72rem; color: #1d4ed8; background: #dbeafe;
+            border-radius: 999px; padding: 2px 8px; text-transform: capitalize;
+        }
+        .progress-meta { font-size: 0.74rem; color: #475569; margin: 2px 0; }
+        .progress-note {
+            margin-top: 5px; font-size: 0.74rem; color: #334155;
+            background: #f8fafc; border-radius: 8px; padding: 5px 7px;
+        }
+        .progress-empty {
+            font-size: 0.8rem; color: #64748b; background: #fff;
+            border: 1px dashed #cbd5e1; border-radius: 8px; padding: 10px;
+        }
+
+        @media (max-width: 900px) {
+            .detail-layout { grid-template-columns: 1fr; height: auto; overflow: visible; }
+            .detail-left { border-right: none; border-bottom: 1px solid #e2e8f0; height: auto; overflow: visible; }
+            .detail-right { position: static; height: auto; min-height: 0; overflow: visible; }
+            .viewer-frame { min-height: 520px; }
+            .detail-toolbar-page-count { margin-left: 0; }
+        }
     </style>
 </head>
 <body<?php if (!empty($showSentToast)): ?> data-sent="1"<?php endif; ?><?php if (!empty($showSentHeadToast)): ?> data-sent-head="1" data-sent-head-count="<?= (int)$showSentHeadCount ?>"<?php endif; ?><?php if (!empty($showAddedToast)): ?> data-added="1"<?php endif; ?><?php if (!empty($addError)): ?> data-add-error="1"<?php endif; ?><?php if (!empty($showSendErrorToast)): ?> data-send-error="1"<?php endif; ?><?php if ($sendErrorDetail !== ''): ?> data-send-error-detail="<?= htmlspecialchars($sendErrorDetail) ?>"<?php endif; ?>>
@@ -542,6 +862,7 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
             </div>
 
             <div class="admin-content-body">
+                <?php if (!$isViewMode): ?>
                 <section class="chart-card chart-card-wide offices-card">
                     <div class="offices-tools doc-filter-row">
                         <input type="text" placeholder="Search" aria-label="Search document">
@@ -585,12 +906,12 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
                                     <td><?= (int)($idx + 1) ?></td>
                                     <td><?= htmlspecialchars($sent['documentCode'] ?? '—') ?></td>
                                     <td><?= htmlspecialchars($sent['documentTitle'] ?? '—') ?></td>
-                                    <td><a href="documents.php?view=<?= urlencode($docId) ?>" class="doc-file-link document-view-trigger" data-doc-id="<?= htmlspecialchars($docId) ?>" data-doc-name="<?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?>" data-sent-record-id="<?= htmlspecialchars((string)($sent['sentRecordId'] ?? '')) ?>" data-stamp-image="<?= htmlspecialchars((string)($sent['stamp_image'] ?? '')) ?>" data-stamp-width="<?= htmlspecialchars((string)($sent['stamp_width_pct'] ?? '18')) ?>" data-stamp-x="<?= htmlspecialchars((string)($sent['stamp_x_pct'] ?? '82')) ?>" data-stamp-y="<?= htmlspecialchars((string)($sent['stamp_y_pct'] ?? '84')) ?>"><?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?></a></td>
+                                    <td><a href="documents.php?doc=<?= urlencode($docId) ?>" class="doc-file-link"><?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?></a></td>
                                     <td><span class="document-status document-status-<?= strtolower(htmlspecialchars($sentStatus)) ?>"><?= htmlspecialchars($sentStatus) ?></span></td>
                                     <td><?= htmlspecialchars($sent['sentAtFormatted'] ?? '—') ?></td>
                                     <td>
                                         <div class="documents-actions-row">
-                                            <a href="documents.php?view=<?= urlencode($docId) ?>" class="documents-action-btn documents-action-open document-view-trigger" data-doc-id="<?= htmlspecialchars($docId) ?>" data-doc-name="<?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?>" data-sent-record-id="<?= htmlspecialchars((string)($sent['sentRecordId'] ?? '')) ?>" data-stamp-image="<?= htmlspecialchars((string)($sent['stamp_image'] ?? '')) ?>" data-stamp-width="<?= htmlspecialchars((string)($sent['stamp_width_pct'] ?? '18')) ?>" data-stamp-x="<?= htmlspecialchars((string)($sent['stamp_x_pct'] ?? '82')) ?>" data-stamp-y="<?= htmlspecialchars((string)($sent['stamp_y_pct'] ?? '84')) ?>" title="View document"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>View</a>
+                                            <a href="documents.php?doc=<?= urlencode($docId) ?>" class="documents-action-btn documents-action-open" title="View document"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>View</a>
                                             <button type="button" class="documents-action-btn documents-action-send send-admin-trigger" data-doc-id="<?= htmlspecialchars($docId) ?>" data-doc-name="<?= htmlspecialchars($sent['fileName'] ?? 'document.docx') ?>" title="Send to Admin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send to Admin</button>
                                         </div>
                                     </td>
@@ -601,6 +922,145 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
                         </table>
                     </div>
                 </section>
+
+                <?php else: ?>
+                <!-- ═══ DETAIL VIEW ═══ -->
+                <div class="detail-layout">
+                    <div class="detail-left">
+                        <div class="detail-toolbar">
+                            <a class="detail-toolbar-btn" href="documents.php">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+                                Back
+                            </a>
+                            <?php if (!empty($sentList)): ?>
+                            <select class="detail-toolbar-select" id="detail-doc-switch" aria-label="Select document">
+                                <?php foreach ($sentList as $listDoc): ?>
+                                    <?php $listDocId = (string)($listDoc['documentId'] ?? ''); ?>
+                                    <option value="<?php echo htmlspecialchars($listDocId); ?>" <?php echo $listDocId === $selectedDocumentId ? 'selected' : ''; ?>>
+                                        <?php echo htmlspecialchars(($listDoc['documentCode'] ?? 'DOC') . ' - ' . ($listDoc['documentTitle'] ?? 'Document')); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <?php endif; ?>
+                            <?php if ($isSelectedDocx): ?>
+                            <span class="detail-toolbar-page-count" id="detail-page-count">Pages: --</span>
+                            <?php endif; ?>
+                            <button type="button" class="detail-toolbar-btn" id="detail-print-btn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+                                Print
+                            </button>
+                            <a class="detail-toolbar-btn" href="documents.php?download=<?php echo urlencode($selectedDocumentId); ?>">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                Download
+                            </a>
+                            <button type="button" class="detail-toolbar-btn btn-send-admin detail-send-admin-trigger" data-doc-id="<?php echo htmlspecialchars($selectedDocumentId); ?>" data-doc-name="<?php echo htmlspecialchars($selectedFileName); ?>">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                                Send to Admin
+                            </button>
+                            <button type="button" class="detail-toolbar-btn btn-view-progress" id="open-progress-btn">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                                View Progress
+                            </button>
+                        </div>
+                        <div class="detail-viewer">
+                            <?php if ($isSelectedImage): ?>
+                                <img class="viewer-image" id="detail-viewer-image" src="documents.php?view=<?php echo urlencode($selectedDocumentId); ?>" alt="<?php echo htmlspecialchars($selectedFileName); ?>">
+                            <?php elseif ($isSelectedPdf): ?>
+                                <iframe class="viewer-frame" id="detail-viewer-frame" src="documents.php?view=<?php echo urlencode($selectedDocumentId); ?>"></iframe>
+                            <?php elseif ($isSelectedDocx): ?>
+                                <div id="detail-docx-container" style="width:100%;min-height:520px;background:#fff;border-radius:6px;border:1px solid #e2e8f0;overflow:visible;"></div>
+                            <?php else: ?>
+                                <div class="viewer-fallback">
+                                    <p>Preview not available for this file type.</p>
+                                    <p><strong><?php echo htmlspecialchars($selectedFileName); ?></strong></p>
+                                    <a class="detail-toolbar-btn" href="documents.php?download=<?php echo urlencode($selectedDocumentId); ?>">Download file</a>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+
+                    <div class="detail-right">
+                        <div class="comments-header">Comments &amp; Notes</div>
+                        <div class="superadmin-note-box">
+                            <div class="superadmin-note-label">Super Admin Note</div>
+                            <div class="superadmin-note-text"><?php echo $superAdminNote !== '' ? nl2br(htmlspecialchars($superAdminNote)) : 'No note provided.'; ?></div>
+                        </div>
+                        <div class="comments-list" id="detail-comments-list">
+                            <?php if ($selectedDocument): ?>
+                            <div class="comment-item">
+                                <div class="comment-avatar sa"><?php echo mb_strtoupper(mb_substr((string)($selectedDocument['sent_by_user_name'] ?? $userName ?? 'S'), 0, 1)); ?></div>
+                                <div class="comment-body">
+                                    <div class="comment-meta">
+                                        <div class="comment-name"><?php echo htmlspecialchars((string)($selectedDocument['sent_by_user_name'] ?? $userName ?? 'Super Admin')); ?></div>
+                                    </div>
+                                    <div class="comment-text">Document "<strong><?php echo htmlspecialchars((string)($selectedDocument['documentTitle'] ?? '')); ?></strong>" — <?php echo htmlspecialchars((string)($selectedDocument['documentCode'] ?? '')); ?></div>
+                                    <div class="comment-time"><?php echo htmlspecialchars((string)($selectedDocument['sentAtFormatted'] ?? '')); ?></div>
+                                </div>
+                            </div>
+                            <?php else: ?>
+                            <div class="comments-empty">No comments yet.</div>
+                            <?php endif; ?>
+                        </div>
+                        <div class="comment-compose">
+                            <input type="text" class="comment-input" id="detail-comment-input" placeholder="Write a comment...">
+                            <button type="button" class="comment-send-btn" id="detail-comment-send">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="progress-offcanvas-backdrop" id="progress-offcanvas-backdrop"></div>
+                <aside class="progress-offcanvas" id="progress-offcanvas" aria-hidden="true">
+                    <div class="progress-offcanvas-head">
+                        <div>
+                            <h3 class="progress-offcanvas-title">Document Progress Tracker</h3>
+                            <p class="progress-offcanvas-sub">Track where and when this document moved.</p>
+                        </div>
+                        <button type="button" class="progress-close-btn" id="close-progress-btn" aria-label="Close progress tracker">&times;</button>
+                    </div>
+                    <div class="progress-offcanvas-body">
+                        <div class="progress-current-holder">
+                            <strong>Current Holder:</strong>
+                            <span><?php echo htmlspecialchars($currentHolderLabel); ?></span>
+                        </div>
+                        <?php if (!empty($progressEvents)): ?>
+                            <ol class="progress-timeline">
+                                <?php foreach ($progressEvents as $event): ?>
+                                    <?php
+                                        $receivedAt = trim((string)($event['received_at'] ?? ''));
+                                        $processedAt = trim((string)($event['processed_at'] ?? ''));
+                                        $receivedDisplay = '—';
+                                        $processedDisplay = '—';
+                                        if ($receivedAt !== '') {
+                                            try { $dt = new DateTime($receivedAt); $dt->setTimezone(new DateTimeZone('Asia/Manila')); $receivedDisplay = $dt->format('M j, Y g:i A'); } catch (Exception $e) {}
+                                        }
+                                        if ($processedAt !== '') {
+                                            try { $dt2 = new DateTime($processedAt); $dt2->setTimezone(new DateTimeZone('Asia/Manila')); $processedDisplay = $dt2->format('M j, Y g:i A'); } catch (Exception $e) {}
+                                        }
+                                    ?>
+                                    <li class="progress-item">
+                                        <span class="progress-dot"></span>
+                                        <div class="progress-card">
+                                            <div class="progress-item-head">
+                                                <span class="progress-item-dept"><?php echo htmlspecialchars((string)($event['department'] ?? '')); ?></span>
+                                                <span class="progress-item-action"><?php echo htmlspecialchars((string)($event['action'] ?? '')); ?></span>
+                                            </div>
+                                            <div class="progress-meta"><strong>Received:</strong> <?php echo htmlspecialchars($receivedDisplay); ?></div>
+                                            <div class="progress-meta"><strong>Processed:</strong> <?php echo htmlspecialchars($processedDisplay); ?></div>
+                                            <?php if (trim((string)($event['notes'] ?? '')) !== ''): ?>
+                                                <div class="progress-note"><?php echo htmlspecialchars((string)($event['notes'] ?? '')); ?></div>
+                                            <?php endif; ?>
+                                        </div>
+                                    </li>
+                                <?php endforeach; ?>
+                            </ol>
+                        <?php else: ?>
+                            <div class="progress-empty">No progress events yet for this document.</div>
+                        <?php endif; ?>
+                    </div>
+                </aside>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -708,6 +1168,9 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
                         </select>
                         <small class="stamp-auto-head" id="stamp-head-preview">Assigned head: —</small>
                     </label>
+                    <label class="full" data-for-types="approved,received,endorsement">Notes <small style="font-weight:400;color:#64748b;">(optional)</small>
+                        <textarea id="stamp-notes-input" placeholder="Add notes or remarks..." rows="2"></textarea>
+                    </label>
                 </div>
                 <div class="doc-modal-actions">
                     <button type="button" class="doc-btn doc-btn-cancel" data-close-stamp-detail>Cancel</button>
@@ -725,6 +1188,7 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
         <input type="hidden" name="stamp_width_pct" id="send-admin-width" value="18">
         <input type="hidden" name="stamp_x_pct" id="send-admin-x" value="82">
         <input type="hidden" name="stamp_y_pct" id="send-admin-y" value="84">
+        <input type="hidden" name="notes" id="send-admin-notes" value="">
     </form>
 
     <div class="doc-modal" id="document-view-modal" hidden>
@@ -750,6 +1214,124 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
 
     <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/docx-preview@0.3.0/dist/docx-preview.min.js"></script>
+
+    <?php if ($isViewMode && $isSelectedDocx): ?>
+    <script>
+    (function() {
+        var container = document.getElementById('detail-docx-container');
+        var pageCountLabel = document.getElementById('detail-page-count');
+        if (!container) return;
+        function updatePageCount() {
+            if (!pageCountLabel) return;
+            var pageNodes = container.querySelectorAll('.docx-wrapper > section.docx');
+            if (!pageNodes || pageNodes.length < 1) pageNodes = container.querySelectorAll('section.docx');
+            var total = pageNodes ? pageNodes.length : 0;
+            pageCountLabel.textContent = 'Pages: ' + (total > 0 ? total : 1);
+        }
+        fetch('documents.php?view=<?php echo urlencode($selectedDocumentId); ?>')
+            .then(function(r) { if (!r.ok) throw new Error(); return r.blob(); })
+            .then(function(blob) {
+                if (typeof docx !== 'undefined' && docx.renderAsync) {
+                    docx.renderAsync(blob, container, null, { breakPages: true, ignoreLastRenderedPageBreak: false }).then(function() { updatePageCount(); });
+                }
+            })
+            .catch(function() {
+                container.innerHTML = '<p style="padding:20px;color:#64748b;text-align:center;">Could not load document preview.</p>';
+                if (pageCountLabel) pageCountLabel.textContent = 'Pages: --';
+            });
+    })();
+    </script>
+    <?php endif; ?>
+
+    <?php if ($isViewMode): ?>
+    <script>
+    (function() {
+        var docSwitch = document.getElementById('detail-doc-switch');
+        if (docSwitch) {
+            docSwitch.addEventListener('change', function() {
+                var id = (docSwitch.value || '').trim();
+                if (id) window.location.href = 'documents.php?doc=' + encodeURIComponent(id);
+            });
+        }
+
+        var printBtn = document.getElementById('detail-print-btn');
+        if (printBtn) {
+            printBtn.addEventListener('click', function() {
+                var img = document.getElementById('detail-viewer-image');
+                if (img && img.src) {
+                    var w = window.open('', '_blank');
+                    if (w) { w.document.write('<html><head><title>Print</title></head><body style="margin:0;text-align:center;"><img src="' + img.src + '" style="max-width:100%;"></body></html>'); w.document.close(); w.focus(); setTimeout(function() { w.print(); }, 350); }
+                    return;
+                }
+                var frame = document.getElementById('detail-viewer-frame');
+                if (frame) { window.open(frame.src, '_blank'); return; }
+                var docxC = document.getElementById('detail-docx-container');
+                if (docxC) {
+                    var w = window.open('', '_blank');
+                    if (w) { w.document.write('<html><head><title>Print</title></head><body>' + docxC.innerHTML + '</body></html>'); w.document.close(); w.focus(); setTimeout(function() { w.print(); }, 400); }
+                }
+            });
+        }
+
+        var openProgressBtn = document.getElementById('open-progress-btn');
+        var closeProgressBtn = document.getElementById('close-progress-btn');
+        var progressOffcanvas = document.getElementById('progress-offcanvas');
+        var progressBackdrop = document.getElementById('progress-offcanvas-backdrop');
+        if (progressOffcanvas && progressOffcanvas.parentNode !== document.body) document.body.appendChild(progressOffcanvas);
+        if (progressBackdrop && progressBackdrop.parentNode !== document.body) document.body.appendChild(progressBackdrop);
+        function closeProgressPanel() {
+            if (!progressOffcanvas || !progressBackdrop) return;
+            progressOffcanvas.classList.remove('open');
+            progressBackdrop.classList.remove('open');
+            progressOffcanvas.setAttribute('aria-hidden', 'true');
+            document.body.style.overflow = '';
+        }
+        function openProgressPanel() {
+            if (!progressOffcanvas || !progressBackdrop) return;
+            progressOffcanvas.classList.add('open');
+            progressBackdrop.classList.add('open');
+            progressOffcanvas.setAttribute('aria-hidden', 'false');
+            document.body.style.overflow = 'hidden';
+        }
+        if (openProgressBtn) openProgressBtn.addEventListener('click', openProgressPanel);
+        if (closeProgressBtn) closeProgressBtn.addEventListener('click', closeProgressPanel);
+        if (progressBackdrop) progressBackdrop.addEventListener('click', closeProgressPanel);
+        document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeProgressPanel(); });
+
+        var commentInput = document.getElementById('detail-comment-input');
+        var commentSendBtn = document.getElementById('detail-comment-send');
+        var commentsList = document.getElementById('detail-comments-list');
+        if (commentInput && commentSendBtn && commentsList) {
+            function addComment() {
+                var txt = (commentInput.value || '').trim();
+                if (!txt) return;
+                var now = new Date();
+                var ts = now.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+                var item = document.createElement('div');
+                item.className = 'comment-item';
+                item.innerHTML = '<div class="comment-avatar sa"><?php echo mb_strtoupper(mb_substr($userName, 0, 1)); ?></div><div class="comment-body"><div class="comment-name"><?php echo htmlspecialchars($userName); ?></div><div class="comment-text"></div><div class="comment-time">' + ts + '</div></div>';
+                item.querySelector('.comment-text').textContent = txt;
+                commentsList.appendChild(item);
+                commentsList.scrollTop = commentsList.scrollHeight;
+                commentInput.value = '';
+            }
+            commentSendBtn.addEventListener('click', addComment);
+            commentInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); addComment(); } });
+        }
+
+        document.querySelectorAll('.detail-send-admin-trigger').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var docId = btn.getAttribute('data-doc-id') || '';
+                var docName = btn.getAttribute('data-doc-name') || 'document.docx';
+                if (typeof openSendAdminModal === 'function') {
+                    openSendAdminModal(docId, docName);
+                }
+            });
+        });
+    })();
+    </script>
+    <?php endif; ?>
+
     <script>
     (function() {
         var uploadedStampData = <?php echo json_encode($currentUserStamp); ?> || '';
@@ -895,8 +1477,11 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
         var stampByInput = document.getElementById('stamp-by-input');
         var stampToInput = document.getElementById('stamp-to-input');
         var stampHeadPreview = document.getElementById('stamp-head-preview');
+        var stampNotesInput = document.getElementById('stamp-notes-input');
+        var sendAdminNotesField = document.getElementById('send-admin-notes');
         var sendStampNode = null;
         var sendStampCfg = { width: 18, x: 82, y: 84, tilt: 0 };
+        var sendStampAwaitingPlacement = false;
         var activeStampType = 'approved';
         var generatedStampData = '';
 
@@ -1163,6 +1748,11 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
             if (sendAdminTiltLabel) sendAdminTiltLabel.textContent = Math.round(sendStampCfg.tilt) + '°';
         }
 
+        function updateSendStampPlacementCursor() {
+            if (!sendAdminContainer) return;
+            sendAdminContainer.style.cursor = sendStampAwaitingPlacement ? 'crosshair' : '';
+        }
+
         function ensureSendStampNode() {
             if (!sendAdminContainer) return null;
             var src = generatedStampData;
@@ -1181,11 +1771,37 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
             return sendStampNode;
         }
 
+        function clearSendStampNode() {
+            if (sendStampNode && sendStampNode.parentNode) {
+                sendStampNode.parentNode.removeChild(sendStampNode);
+            }
+            sendStampNode = null;
+        }
+
+        function placeSendStampAtClientPoint(clientX, clientY) {
+            if (!generatedStampData || !sendAdminContainer) return false;
+            ensureSendStampNode();
+            if (!sendStampNode) return false;
+            var targetEl = getStampTargetElement(sendAdminContainer);
+            if (!targetEl) return false;
+            var rect = targetEl.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return false;
+            sendStampCfg.x = ((clientX - rect.left) / rect.width) * 100;
+            sendStampCfg.y = ((clientY - rect.top) / rect.height) * 100;
+            applySendStampStyles();
+            sendStampAwaitingPlacement = false;
+            updateSendStampPlacementCursor();
+            return true;
+        }
+
+        window.openSendAdminModal = openSendAdminModal;
         function openSendAdminModal(docId, docName) {
             if (!sendAdminModal || !sendAdminContainer) return;
             sendStampCfg = { width: 18, x: 82, y: 84, tilt: 0 };
             sendStampNode = null;
+            sendStampAwaitingPlacement = false;
             generatedStampData = '';
+            updateSendStampPlacementCursor();
             if (sendAdminDocId) sendAdminDocId.value = docId || '';
             if (sendAdminStampImageData) sendAdminStampImageData.value = '';
             activeStampType = 'approved';
@@ -1195,6 +1811,7 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
             if (stampTimeInput) stampTimeInput.value = toHmLocal(now);
             if (stampByInput) stampByInput.value = <?php echo json_encode((string)$welcomeUsername); ?>;
             if (stampToInput) stampToInput.value = '';
+            if (stampNotesInput) stampNotesInput.value = '';
             updateStampFieldVisibility();
             sendAdminModal.hidden = false;
             document.body.classList.add('modal-open');
@@ -1243,6 +1860,8 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
             if (sendAdminLoading) sendAdminLoading.style.display = 'block';
             if (sendAdminError) sendAdminError.style.display = 'none';
             sendStampNode = null;
+            sendStampAwaitingPlacement = false;
+            updateSendStampPlacementCursor();
             closeStampDetailModal();
         }
 
@@ -1275,8 +1894,9 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
                     return;
                 }
                 refreshGeneratedStamp();
-                ensureSendStampNode();
-                applySendStampStyles();
+                clearSendStampNode();
+                sendStampAwaitingPlacement = true;
+                updateSendStampPlacementCursor();
                 closeStampDetailModal();
             });
         }
@@ -1314,6 +1934,12 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
                 applySendStampStyles();
             }
             sendAdminContainer.addEventListener('mousedown', function(e) {
+                if (sendStampAwaitingPlacement && generatedStampData) {
+                    if (placeSendStampAtClientPoint(e.clientX, e.clientY)) {
+                        e.preventDefault();
+                    }
+                    return;
+                }
                 if (!sendStampNode) return;
                 if (e.target === sendStampNode) {
                     draggingStamp = true;
@@ -1370,6 +1996,10 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
                     alert('Please choose a stamp type and click Apply first.');
                     return;
                 }
+                if (!sendStampNode || sendStampAwaitingPlacement) {
+                    alert('Please click on the document preview to place the stamp first.');
+                    return;
+                }
                 if (sendAdminAction) sendAdminAction.value = (activeStampType === 'endorsement') ? 'send_to_head' : 'send_to_admin';
                 if (sendAdminOfficeId) sendAdminOfficeId.value = '';
                 if (activeStampType === 'endorsement') {
@@ -1386,6 +2016,7 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
                 sendAdminWidth.value = String(sendStampCfg.width.toFixed(2));
                 sendAdminX.value = String(sendStampCfg.x.toFixed(2));
                 sendAdminY.value = String(sendStampCfg.y.toFixed(2));
+                if (sendAdminNotesField) sendAdminNotesField.value = (stampNotesInput ? stampNotesInput.value : '').trim();
                 buildStampImageForSubmit(function(finalStampData) {
                     if (sendAdminStampImageData) sendAdminStampImageData.value = finalStampData || generatedStampData;
                     sendAdminForm.submit();
@@ -1529,8 +2160,8 @@ $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
         });
     })();
     </script>
-    <script src="sidebar_super_admin.js"></script>
-    <?php $notifJsVer = @filemtime(__DIR__ . '/super_admin_notifications.js') ?: time(); ?>
-    <script src="super_admin_notifications.js?v=<?= (int)$notifJsVer ?>"></script>
+    <script src="assets/js/sidebar_super_admin.js"></script>
+    <?php $notifJsVer = @filemtime(__DIR__ . '/assets/js/super_admin_notifications.js') ?: time(); ?>
+    <script src="assets/js/super_admin_notifications.js?v=<?= (int)$notifJsVer ?>"></script>
 </body>
 </html>

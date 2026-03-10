@@ -138,8 +138,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
     <title>Edit User – DMS LGU</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="sidebar_super_admin.css">
-    <link rel="stylesheet" href="../Admin Side/admin-dashboard.css">
+    <link rel="stylesheet" href="assets/css/sidebar_super_admin.css">
+    <link rel="stylesheet" href="../Admin%20Side/assets/css/admin-dashboard.css">
     <style>
         body { margin: 0; background: #f8fafc; }
         .main-content { padding: 1.5rem 2rem; }
@@ -387,6 +387,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
         }
     })();
     </script>
-    <script src="sidebar_super_admin.js"></script>
+    <script src="assets/js/sidebar_super_admin.js"></script>
 </body>
 </html>

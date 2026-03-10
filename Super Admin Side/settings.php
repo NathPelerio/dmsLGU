@@ -41,9 +41,9 @@ $userPhotoForView = $_SESSION['user_photo'] ?? '';
     <meta charset="UTF-8">
     <title>DMS LGU – Settings</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="styles.css">
-    <link rel="stylesheet" href="sidebar_super_admin.css">
-    <link rel="stylesheet" href="profile_modal_super_admin.css">
+    <link rel="stylesheet" href="assets/css/styles.css">
+    <link rel="stylesheet" href="assets/css/sidebar_super_admin.css">
+    <link rel="stylesheet" href="assets/css/profile_modal_super_admin.css">
     <style>
         body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
         .main-content { background: #f1f5f9; }
@@ -244,7 +244,7 @@ $userPhotoForView = $_SESSION['user_photo'] ?? '';
         <input type="hidden" name="photo" id="profile-photo-hidden-input">
     </form>
 
-    <script src="sidebar_super_admin.js"></script>
+    <script src="assets/js/sidebar_super_admin.js"></script>
     <script>
     (function(){
         var toast = document.getElementById('settings-toast');

@@ -189,7 +189,7 @@ $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Staff – Documents</title>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="staff-dashboard.css">
+    <link rel="stylesheet" href="assets/css/staff-dashboard.css">
     <style>
         /* Documents page – design styles */
         .documents-page {

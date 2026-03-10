@@ -777,11 +777,11 @@ function getUserAccountStatusMeta($u) {
     <title>DMS LGU – Users / Accounts</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css">
-    <link rel="stylesheet" href="profile_modal_super_admin.css">
-    <link rel="stylesheet" href="../Admin Side/admin-dashboard.css">
-    <link rel="stylesheet" href="../Admin Side/admin-offices.css">
-    <link rel="stylesheet" href="sidebar_super_admin.css">
+    <link rel="stylesheet" href="assets/css/styles.css">
+    <link rel="stylesheet" href="assets/css/profile_modal_super_admin.css">
+    <link rel="stylesheet" href="../Admin%20Side/assets/css/admin-dashboard.css">
+    <link rel="stylesheet" href="../Admin%20Side/assets/css/admin-offices.css">
+    <link rel="stylesheet" href="assets/css/sidebar_super_admin.css">
     <style>
         body { margin: 0; background: #f8fafc; color: #0f172a; }
         .main-content { display: flex; flex-direction: column; flex: 1; min-height: 0; background: #fff; }
@@ -2171,8 +2171,8 @@ function getUserAccountStatusMeta($u) {
         window.setInterval(tickSuspendCountdowns, 1000);
     })();
     </script>
-    <?php $notifJsVer = @filemtime(__DIR__ . '/super_admin_notifications.js') ?: time(); ?>
-    <script src="sidebar_super_admin.js"></script>
-    <script src="super_admin_notifications.js?v=<?= (int)$notifJsVer ?>"></script>
+    <?php $notifJsVer = @filemtime(__DIR__ . '/assets/js/super_admin_notifications.js') ?: time(); ?>
+    <script src="assets/js/sidebar_super_admin.js"></script>
+    <script src="assets/js/super_admin_notifications.js?v=<?= (int)$notifJsVer ?>"></script>
 </body>
 </html>
