@@ -221,11 +221,16 @@ try {
                                     <?php else: ?>
                                     <?php foreach ($recentDocuments as $doc): ?>
                                     <?php
-                                        $controlNo = isset($doc['controlNo']) ? htmlspecialchars($doc['controlNo']) : (isset($doc['control_no']) ? htmlspecialchars($doc['control_no']) : '-');
+                                        $controlNo = isset($doc['tracking_code']) ? htmlspecialchars($doc['tracking_code']) : (isset($doc['controlNo']) ? htmlspecialchars($doc['controlNo']) : (isset($doc['control_no']) ? htmlspecialchars($doc['control_no']) : '-'));
                                         $title = isset($doc['title']) ? htmlspecialchars($doc['title']) : (isset($doc['subject']) ? htmlspecialchars($doc['subject']) : '-');
                                         $status = isset($doc['status']) ? htmlspecialchars($doc['status']) : 'Pending';
                                         $date = '-';
-                                        if (isset($doc['createdAt'])) {
+                                        if (isset($doc['created_at'])) {
+                                            $dt = $doc['created_at'];
+                                            if (is_string($dt)) {
+                                                $date = date('M j, Y', strtotime($dt));
+                                            }
+                                        } elseif (isset($doc['createdAt'])) {
                                             $dt = $doc['createdAt'];
                                             if ($dt instanceof DateTimeInterface) {
                                                 $date = $dt->format('M j, Y');

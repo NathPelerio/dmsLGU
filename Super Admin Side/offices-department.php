@@ -24,18 +24,36 @@ $notifCount = $notifData['count'];
 $notifItems = $notifData['items'];
 
 /**
- * Fetch user accounts that have a name/username set (same source as User Management).
- * Used for Assign Head dropdown – only users that appear as "named" in users.php.
- * @return array List of user records with _id (string), username, name, email
+ * Department-head role aliases used in normalized users.role values.
+ * @return string SQL IN clause values
+ */
+function departmentHeadRolesSqlList() {
+    return "'departmenthead','department_head','dept_head'";
+}
+
+/**
+ * Fetch users for Assign Head dropdown.
+ * Returns compatibility keys expected by existing UI.
+ * @return array
  */
 function getUsers() {
     try {
         global $config;
         $pdo = dbPdo($config);
-        $stmt = $pdo->query('SELECT * FROM users ORDER BY username ASC');
+        $stmt = $pdo->query(
+            "SELECT
+                user_id,
+                username,
+                name,
+                email,
+                role,
+                office_id
+             FROM users
+             ORDER BY COALESCE(NULLIF(username, ''), NULLIF(name, ''), email) ASC"
+        );
         $rows = [];
         foreach ($stmt as $arr) {
-            $arr['_id'] = (string)($arr['id'] ?? '');
+            $arr['_id'] = (string)($arr['user_id'] ?? '');
             $username = trim($arr['username'] ?? '');
             $name = trim($arr['name'] ?? '');
             if ($username !== '' || $name !== '') {
@@ -49,27 +67,51 @@ function getUsers() {
 }
 
 /**
- * Fetch offices from MongoDB with optional search filter.
+ * Fetch offices with derived office head details from users table.
+ * UI compatibility fields are preserved: _id, office_head, office_head_id, description.
  * @param string $search Search term for office name or code
- * @return array List of office documents (with _id as string)
+ * @return array
  */
 function getOffices($search = '') {
     try {
         global $config;
         $pdo = dbPdo($config);
+        $headRoleSql = departmentHeadRolesSqlList();
+        $baseSql =
+            "SELECT
+                o.office_id,
+                o.office_name,
+                o.office_code,
+                o.created_at,
+                u.user_id AS office_head_id,
+                COALESCE(NULLIF(u.username, ''), NULLIF(u.name, ''), u.email) AS office_head
+             FROM offices o
+             LEFT JOIN users u
+                ON u.office_id = o.office_id
+               AND LOWER(TRIM(u.role)) IN (" . $headRoleSql . ")";
         if ($search !== '') {
             $stmt = $pdo->prepare(
-                'SELECT * FROM offices
-                 WHERE office_name LIKE :s OR office_code LIKE :s
-                 ORDER BY office_name ASC'
+                $baseSql . '
+                 WHERE o.office_name LIKE :s OR o.office_code LIKE :s
+                 ORDER BY o.office_name ASC, u.user_id ASC'
             );
             $stmt->execute([':s' => '%' . $search . '%']);
         } else {
-            $stmt = $pdo->query('SELECT * FROM offices ORDER BY office_name ASC');
+            $stmt = $pdo->query($baseSql . ' ORDER BY o.office_name ASC, u.user_id ASC');
         }
         $rows = [];
+        $seenOffice = [];
         foreach ($stmt as $arr) {
-            $arr['_id'] = (string)($arr['id'] ?? '');
+            $officeId = (string)($arr['office_id'] ?? '');
+            if ($officeId === '' || isset($seenOffice[$officeId])) {
+                continue;
+            }
+            $seenOffice[$officeId] = true;
+            $arr['_id'] = $officeId;
+            $arr['office_head_id'] = (string)($arr['office_head_id'] ?? '');
+            $arr['office_head'] = (string)($arr['office_head'] ?? '');
+            // Keep compatibility key used by UI; details not part of normalized offices table.
+            $arr['description'] = '';
             $rows[] = $arr;
         }
         return $rows;
@@ -94,14 +136,16 @@ function getOfficeDocumentStats() {
         $receivedSendersByOffice = [];
         $sentRecipientsByHead = [];
 
+        $headRoleSql = departmentHeadRolesSqlList();
+
         $receivedStmt = $pdo->query(
-            'SELECT office_id, COUNT(*) AS total
-             FROM sent_to_department_heads
-             WHERE office_id IS NOT NULL AND office_id <> ""
-             GROUP BY office_id'
+            'SELECT to_office_id AS office_id, COUNT(*) AS total
+             FROM document_routes
+             WHERE to_office_id IS NOT NULL
+             GROUP BY to_office_id'
         );
         foreach ($receivedStmt as $row) {
-            $officeId = trim((string)($row['office_id'] ?? ''));
+            $officeId = (string)($row['office_id'] ?? '');
             if ($officeId === '') {
                 continue;
             }
@@ -109,19 +153,23 @@ function getOfficeDocumentStats() {
         }
 
         $receivedSendersStmt = $pdo->query(
-            'SELECT office_id, sent_by_user_name, COUNT(*) AS total, MAX(sent_at) AS latest_received_at
-             FROM sent_to_department_heads
-             WHERE office_id IS NOT NULL
-               AND office_id <> ""
-             GROUP BY office_id, sent_by_user_name
-             ORDER BY office_id ASC, total DESC, sent_by_user_name ASC'
+            'SELECT
+                dr.to_office_id AS office_id,
+                COALESCE(NULLIF(u.username, \'\'), NULLIF(u.name, \'\'), u.email, \'Unknown sender\') AS sender_name,
+                COUNT(*) AS total,
+                MAX(dr.route_date) AS latest_received_at
+             FROM document_routes dr
+             LEFT JOIN users u ON u.user_id = dr.from_user_id
+             WHERE dr.to_office_id IS NOT NULL
+             GROUP BY dr.to_office_id, sender_name
+             ORDER BY dr.to_office_id ASC, total DESC, sender_name ASC'
         );
         foreach ($receivedSendersStmt as $row) {
-            $officeId = trim((string)($row['office_id'] ?? ''));
+            $officeId = (string)($row['office_id'] ?? '');
             if ($officeId === '') {
                 continue;
             }
-            $senderName = trim((string)($row['sent_by_user_name'] ?? ''));
+            $senderName = trim((string)($row['sender_name'] ?? ''));
             if ($senderName === '') {
                 $senderName = 'Unknown sender';
             }
@@ -136,22 +184,15 @@ function getOfficeDocumentStats() {
         }
 
         $sentStmt = $pdo->query(
-            'SELECT sent_by_user_id, SUM(total) AS total
-             FROM (
-                 SELECT sent_by_user_id, COUNT(*) AS total
-                 FROM sent_to_super_admin
-                 WHERE sent_by_user_id IS NOT NULL AND sent_by_user_id <> ""
-                 GROUP BY sent_by_user_id
-                 UNION ALL
-                 SELECT sent_by_user_id, COUNT(*) AS total
-                 FROM sent_to_admin
-                 WHERE sent_by_user_id IS NOT NULL AND sent_by_user_id <> ""
-                 GROUP BY sent_by_user_id
-             ) sent_union
-             GROUP BY sent_by_user_id'
+            "SELECT dr.from_user_id AS sent_by_user_id, COUNT(*) AS total
+             FROM document_routes dr
+             INNER JOIN users u ON u.user_id = dr.from_user_id
+             WHERE dr.from_user_id IS NOT NULL
+               AND LOWER(TRIM(u.role)) IN (" . $headRoleSql . ")
+             GROUP BY dr.from_user_id"
         );
         foreach ($sentStmt as $row) {
-            $userId = trim((string)($row['sent_by_user_id'] ?? ''));
+            $userId = (string)($row['sent_by_user_id'] ?? '');
             if ($userId === '') {
                 continue;
             }
@@ -159,18 +200,18 @@ function getOfficeDocumentStats() {
         }
 
         $sentRecipientsStmt = $pdo->query(
-            'SELECT sent_by_user_id, recipient_label, COUNT(*) AS total, MAX(sent_at) AS latest_sent_at
-             FROM (
-                 SELECT sent_by_user_id, sent_at, "Super Admin" AS recipient_label
-                 FROM sent_to_super_admin
-                 WHERE sent_by_user_id IS NOT NULL AND sent_by_user_id <> ""
-                 UNION ALL
-                 SELECT sent_by_user_id, sent_at, "Admin" AS recipient_label
-                 FROM sent_to_admin
-                 WHERE sent_by_user_id IS NOT NULL AND sent_by_user_id <> ""
-             ) sent_targets
-             GROUP BY sent_by_user_id, recipient_label
-             ORDER BY sent_by_user_id ASC, total DESC, recipient_label ASC'
+            "SELECT
+                dr.from_user_id AS sent_by_user_id,
+                COALESCE(NULLIF(o.office_name, ''), 'Recipient') AS recipient_label,
+                COUNT(*) AS total,
+                MAX(dr.route_date) AS latest_sent_at
+             FROM document_routes dr
+             LEFT JOIN offices o ON o.office_id = dr.to_office_id
+             INNER JOIN users u ON u.user_id = dr.from_user_id
+             WHERE dr.from_user_id IS NOT NULL
+               AND LOWER(TRIM(u.role)) IN (" . $headRoleSql . ")
+             GROUP BY dr.from_user_id, recipient_label
+             ORDER BY dr.from_user_id ASC, total DESC, recipient_label ASC"
         );
         foreach ($sentRecipientsStmt as $row) {
             $userId = trim((string)($row['sent_by_user_id'] ?? ''));
@@ -188,12 +229,13 @@ function getOfficeDocumentStats() {
         }
 
         $archivedStmt = $pdo->query(
-            'SELECT user_id, COUNT(*) AS total
-             FROM document_history
-             WHERE user_id IS NOT NULL
-               AND user_id <> ""
-               AND LOWER(TRIM(action)) = "archived"
-             GROUP BY user_id'
+            "SELECT da.performed_by AS user_id, COUNT(*) AS total
+             FROM document_actions da
+             INNER JOIN users u ON u.user_id = da.performed_by
+             WHERE da.performed_by IS NOT NULL
+               AND LOWER(TRIM(da.action_type)) = 'archived'
+               AND LOWER(TRIM(u.role)) IN (" . $headRoleSql . ")
+             GROUP BY da.performed_by"
         );
         foreach ($archivedStmt as $row) {
             $userId = trim((string)($row['user_id'] ?? ''));
@@ -233,24 +275,18 @@ function addOffice($officeCode, $officeName, $officeHead, $description = '') {
     global $config;
     $officeCode = trim($officeCode);
     $officeName = trim($officeName);
-    $officeHead = trim($officeHead);
-    $description = trim($description);
     if ($officeCode === '' || $officeName === '') {
         return ['success' => false, 'message' => 'Office code and name are required.'];
     }
     try {
         $pdo = dbPdo($config);
         $stmt = $pdo->prepare(
-            'INSERT INTO offices (id, office_code, office_name, office_head, office_head_id, description, created_at)
-             VALUES (:id, :office_code, :office_name, :office_head, :office_head_id, :description, :created_at)'
+            'INSERT INTO offices (office_code, office_name, created_at)
+             VALUES (:office_code, :office_name, :created_at)'
         );
         $stmt->execute([
-            ':id' => dbGenerateId24(),
             ':office_code' => $officeCode,
             ':office_name' => $officeName,
-            ':office_head' => $officeHead,
-            ':office_head_id' => null,
-            ':description' => $description,
             ':created_at' => dbNowUtcString(),
         ]);
         return ['success' => true, 'message' => 'Department added successfully.'];
@@ -266,8 +302,6 @@ function updateOffice($id, $officeCode, $officeName, $officeHead, $description =
     global $config;
     $officeCode = trim($officeCode);
     $officeName = trim($officeName);
-    $officeHead = trim($officeHead);
-    $description = trim($description);
     if ($officeCode === '' || $officeName === '') {
         return ['success' => false, 'message' => 'Office code and name are required.'];
     }
@@ -275,16 +309,12 @@ function updateOffice($id, $officeCode, $officeName, $officeHead, $description =
         $pdo = dbPdo($config);
         $stmt = $pdo->prepare(
             'UPDATE offices
-             SET office_code = :office_code, office_name = :office_name, office_head = :office_head,
-                 description = :description, updated_at = :updated_at
-             WHERE id = :id'
+             SET office_code = :office_code, office_name = :office_name
+             WHERE office_id = :id'
         );
         $stmt->execute([
             ':office_code' => $officeCode,
             ':office_name' => $officeName,
-            ':office_head' => $officeHead,
-            ':description' => $description,
-            ':updated_at' => dbNowUtcString(),
             ':id' => $id,
         ]);
         return ['success' => true, 'message' => 'Department updated successfully.'];
@@ -303,36 +333,58 @@ function assignHead($id, $officeHeadUserId) {
         return ['success' => false, 'message' => 'Invalid department ID.'];
     }
     $officeHeadUserId = trim($officeHeadUserId);
-    $officeHead = '';
-    $officeHeadId = null;
     if ($officeHeadUserId !== '') {
         try {
             $pdo = dbPdo($config);
-            $stmt = $pdo->prepare('SELECT username, name, email FROM users WHERE id = :id LIMIT 1');
+            $stmt = $pdo->prepare('SELECT user_id FROM users WHERE user_id = :id LIMIT 1');
             $stmt->execute([':id' => $officeHeadUserId]);
             $u = $stmt->fetch();
-            if ($u) {
-                $officeHead = trim($u['username'] ?? $u['name'] ?? $u['email'] ?? '');
-                $officeHeadId = $officeHeadUserId;
+            if (!$u) {
+                return ['success' => false, 'message' => 'Invalid user selected.'];
             }
+            $pdo->beginTransaction();
+            $headRoleSql = departmentHeadRolesSqlList();
+            // Ensure one primary head per office by demoting existing heads in this office.
+            $demote = $pdo->prepare(
+                "UPDATE users
+                 SET role = 'staff'
+                 WHERE office_id = :office_id
+                   AND user_id <> :user_id
+                   AND LOWER(TRIM(role)) IN (" . $headRoleSql . ")"
+            );
+            $demote->execute([
+                ':office_id' => (int)$id,
+                ':user_id' => (int)$officeHeadUserId,
+            ]);
+            $assign = $pdo->prepare(
+                "UPDATE users
+                 SET office_id = :office_id, role = 'department_head'
+                 WHERE user_id = :user_id"
+            );
+            $assign->execute([
+                ':office_id' => (int)$id,
+                ':user_id' => (int)$officeHeadUserId,
+            ]);
+            $pdo->commit();
+            return ['success' => true, 'message' => 'Department head assigned successfully.'];
         } catch (Exception $e) {
+            if (isset($pdo) && $pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
             return ['success' => false, 'message' => 'Invalid user selected.'];
         }
     }
     try {
         $pdo = dbPdo($config);
-        $stmt = $pdo->prepare(
-            'UPDATE offices
-             SET office_head = :office_head, office_head_id = :office_head_id, updated_at = :updated_at
-             WHERE id = :id'
+        $headRoleSql = departmentHeadRolesSqlList();
+        $demote = $pdo->prepare(
+            "UPDATE users
+             SET role = 'staff'
+             WHERE office_id = :office_id
+               AND LOWER(TRIM(role)) IN (" . $headRoleSql . ")"
         );
-        $stmt->execute([
-            ':office_head' => $officeHead,
-            ':office_head_id' => $officeHeadId !== null ? $officeHeadId : null,
-            ':updated_at' => dbNowUtcString(),
-            ':id' => $id,
-        ]);
-        return ['success' => true, 'message' => 'Department head assigned successfully.'];
+        $demote->execute([':office_id' => (int)$id]);
+        return ['success' => true, 'message' => 'Department head cleared.'];
     } catch (Exception $e) {
         return ['success' => false, 'message' => 'Error: ' . $e->getMessage()];
     }
@@ -350,7 +402,7 @@ function deleteOffice($id) {
     }
     try {
         $pdo = dbPdo($config);
-        $stmt = $pdo->prepare('DELETE FROM offices WHERE id = :id LIMIT 1');
+        $stmt = $pdo->prepare('DELETE FROM offices WHERE office_id = :id LIMIT 1');
         $stmt->execute([':id' => $id]);
         return ['success' => true, 'message' => 'Office deleted successfully.'];
     } catch (Exception $e) {
@@ -362,6 +414,13 @@ function deleteOffice($id) {
 $flash = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
+    if ($action === 'verify_current_password' && !empty($_SESSION['user_id'])) {
+        header('Content-Type: application/json; charset=UTF-8');
+        $result = verifyCurrentPassword($_SESSION['user_id'], $_POST['current_password'] ?? '');
+        http_response_code(!empty($result['success']) ? 200 : 422);
+        echo json_encode($result);
+        exit;
+    }
     if ($action === 'add') {
         $flash = addOffice(
             $_POST['office_code'] ?? '',
@@ -388,13 +447,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_POST['new_password'] ?? '',
             $_POST['confirm_password'] ?? ''
         );
+    } elseif ($action === 'update_profile' && !empty($_SESSION['user_id'])) {
+        $flash = updateUserProfileBasics(
+            $_SESSION['user_id'],
+            $_POST['name'] ?? '',
+            $_POST['username'] ?? '',
+            isset($_POST['photo']) ? (string)$_POST['photo'] : null
+        );
     } elseif ($action === 'update_signature' && !empty($_SESSION['user_id']) && isset($_POST['signature'])) {
         $flash = updateUserSignature($_SESSION['user_id'], $_POST['signature']);
     } elseif ($action === 'update_photo' && !empty($_SESSION['user_id']) && isset($_POST['photo'])) {
         $flash = updateUserPhoto($_SESSION['user_id'], $_POST['photo']);
     }
     if ($flash) {
-        header('Location: offices-department.php?msg=' . urlencode($flash['message']) . '&ok=' . ($flash['success'] ? '1' : '0'));
+        $redirectTarget = 'offices-department.php';
+        $redirectInput = trim((string)($_POST['redirect'] ?? ''));
+        if ($redirectInput !== '' && preg_match('/^[A-Za-z0-9._-]+\.php$/', $redirectInput)) {
+            $redirectTarget = $redirectInput;
+        }
+        header('Location: ' . $redirectTarget . '?msg=' . urlencode($flash['message']) . '&ok=' . ($flash['success'] ? '1' : '0'));
         exit;
     }
 }

@@ -1,7 +1,6 @@
 <?php
 /**
- * Department Head notifications based on sent_to_department_heads rows.
- * A notification exists only when a document is endorsed to a department head.
+ * Department Head notifications backed by normalized notifications table.
  */
 
 if (!isset($config)) {
@@ -25,78 +24,46 @@ function departmentHeadNotifPdo($config = null) {
     }
 }
 
-function ensureDepartmentHeadNotifColumns($config = null) {
-    static $checked = false;
-    if ($checked) {
-        return;
+function resolveDepartmentHeadSessionUserId($pdo) {
+    $rawId = trim((string)($_SESSION['user_id'] ?? ''));
+    if ($rawId !== '' && ctype_digit($rawId)) {
+        return (int)$rawId;
     }
-    $checked = true;
-    $pdo = departmentHeadNotifPdo($config);
-    if (!$pdo) {
-        return;
-    }
+    $email = trim((string)($_SESSION['user_email'] ?? ''));
+    $username = trim((string)($_SESSION['user_username'] ?? ''));
+    $name = trim((string)($_SESSION['user_name'] ?? ''));
     try {
-        $cols = [];
-        $stmt = $pdo->query('SHOW COLUMNS FROM sent_to_department_heads');
-        foreach ($stmt as $row) {
-            $name = strtolower((string)($row['Field'] ?? ''));
-            if ($name !== '') {
-                $cols[$name] = true;
+        if ($email !== '') {
+            $stmt = $pdo->prepare('SELECT user_id FROM users WHERE LOWER(email) = LOWER(:email) LIMIT 1');
+            $stmt->execute([':email' => $email]);
+            $row = $stmt->fetch();
+            if ($row && !empty($row['user_id'])) {
+                $_SESSION['user_id'] = (string)$row['user_id'];
+                return (int)$row['user_id'];
             }
         }
-        if (!isset($cols['read_at'])) {
-            $pdo->exec('ALTER TABLE sent_to_department_heads ADD COLUMN read_at DATETIME NULL DEFAULT NULL AFTER sent_at');
+        if ($username !== '') {
+            $stmt = $pdo->prepare('SELECT user_id FROM users WHERE LOWER(username) = LOWER(:username) LIMIT 1');
+            $stmt->execute([':username' => $username]);
+            $row = $stmt->fetch();
+            if ($row && !empty($row['user_id'])) {
+                $_SESSION['user_id'] = (string)$row['user_id'];
+                return (int)$row['user_id'];
+            }
+        }
+        if ($name !== '') {
+            $stmt = $pdo->prepare('SELECT user_id FROM users WHERE LOWER(name) = LOWER(:name) LIMIT 1');
+            $stmt->execute([':name' => $name]);
+            $row = $stmt->fetch();
+            if ($row && !empty($row['user_id'])) {
+                $_SESSION['user_id'] = (string)$row['user_id'];
+                return (int)$row['user_id'];
+            }
         }
     } catch (Exception $e) {
-        // Best-effort migration.
+        return 0;
     }
-}
-
-function departmentHeadNotifContextFromSession() {
-    $userId = trim((string)($_SESSION['user_id'] ?? ''));
-    $userName = trim((string)($_SESSION['user_name'] ?? ''));
-    $userEmail = trim((string)($_SESSION['user_email'] ?? ''));
-    $userUsername = trim((string)($_SESSION['user_username'] ?? ''));
-    $userDepartment = trim((string)($_SESSION['user_department'] ?? ''));
-
-    $candidates = [];
-    foreach ([$userUsername, $userName, $userEmail] as $candidate) {
-        $v = mb_strtolower(trim((string)$candidate));
-        if ($v !== '') {
-            $candidates[] = $v;
-        }
-    }
-    $candidates = array_values(array_unique($candidates));
-
-    return [
-        'user_id' => $userId,
-        'head_name_1' => $candidates[0] ?? '',
-        'head_name_2' => $candidates[1] ?? ($candidates[0] ?? ''),
-        'head_name_3' => $candidates[2] ?? ($candidates[1] ?? ($candidates[0] ?? '')),
-        'user_department' => $userDepartment,
-    ];
-}
-
-function departmentHeadNotifBindParams($ctx) {
-    return [
-        ':user_id' => (string)($ctx['user_id'] ?? ''),
-        ':head_name_1' => (string)($ctx['head_name_1'] ?? ''),
-        ':head_name_2' => (string)($ctx['head_name_2'] ?? ''),
-        ':head_name_3' => (string)($ctx['head_name_3'] ?? ''),
-        ':user_department_check' => (string)($ctx['user_department'] ?? ''),
-        ':user_department_value' => (string)($ctx['user_department'] ?? ''),
-    ];
-}
-
-function departmentHeadRecipientSql($alias = 'sth') {
-    return '(' . $alias . '.office_head_id = :user_id
-        OR (
-            ' . $alias . '.office_head_id IS NULL
-            AND (
-                LOWER(TRIM(' . $alias . '.office_head_name)) IN (:head_name_1, :head_name_2, :head_name_3)
-                OR (:user_department_check <> \'\' AND LOWER(TRIM(' . $alias . '.office_name)) = LOWER(TRIM(:user_department_value)))
-            )
-        ))';
+    return 0;
 }
 
 function getDepartmentHeadNotifications($config = null, $ctx = null) {
@@ -104,61 +71,85 @@ function getDepartmentHeadNotifications($config = null, $ctx = null) {
     if (!$pdo) {
         return ['count' => 0, 'items' => []];
     }
-    ensureDepartmentHeadNotifColumns($config);
-    if (!is_array($ctx)) {
-        $ctx = departmentHeadNotifContextFromSession();
+
+    $currentUserId = resolveDepartmentHeadSessionUserId($pdo);
+    if ($currentUserId <= 0) {
+        return ['count' => 0, 'items' => []];
     }
-    $params = departmentHeadNotifBindParams($ctx);
 
     try {
         $unreadStmt = $pdo->prepare(
             'SELECT COUNT(*) AS unread_count
-             FROM sent_to_department_heads sth
-             WHERE ' . departmentHeadRecipientSql('sth') . '
-               AND sth.read_at IS NULL'
+             FROM notifications
+             WHERE user_id = :user_id
+               AND is_read = 0'
         );
-        $unreadStmt->execute($params);
+        $unreadStmt->execute([':user_id' => $currentUserId]);
         $unreadRow = $unreadStmt->fetch();
         $unreadCount = (int)($unreadRow['unread_count'] ?? 0);
 
         $stmt = $pdo->prepare(
             'SELECT
-                sth.id AS notification_id,
-                sth.document_id,
-                sth.sent_by_user_name,
-                sth.sent_at,
-                sth.read_at,
-                d.document_code,
-                d.document_title
-             FROM sent_to_department_heads sth
-             LEFT JOIN documents d ON d.id = sth.document_id
-             WHERE ' . departmentHeadRecipientSql('sth') . '
-               AND sth.read_at IS NULL
-             ORDER BY sth.sent_at DESC, sth.id DESC
+                n.notification_id,
+                n.document_id,
+                n.notification_type,
+                n.message,
+                n.link,
+                n.is_read,
+                n.created_at,
+                d.subject,
+                d.tracking_code
+             FROM notifications n
+             LEFT JOIN documents d ON d.document_id = n.document_id
+             WHERE n.user_id = :user_id
+             ORDER BY n.created_at DESC
              LIMIT 20'
         );
-        $stmt->execute($params);
+        $stmt->execute([':user_id' => $currentUserId]);
 
         $items = [];
         foreach ($stmt as $row) {
             $sentAtFormatted = '—';
-            if (!empty($row['sent_at'])) {
+            if (!empty($row['created_at'])) {
                 try {
-                    $dt = new DateTime((string)$row['sent_at']);
+                    $dt = new DateTime((string)$row['created_at']);
                     $dt->setTimezone(new DateTimeZone('Asia/Manila'));
                     $sentAtFormatted = $dt->format('M j, Y g:i A');
                 } catch (Exception $e) {
                     $sentAtFormatted = '—';
                 }
             }
+
+            $documentTitle = trim((string)($row['subject'] ?? ''));
+            if ($documentTitle === '') {
+                $documentTitle = trim((string)($row['message'] ?? 'Document'));
+            }
+            if ($documentTitle === '') {
+                $documentTitle = 'Document';
+            }
+
+            $sender = 'System';
+            $msg = trim((string)($row['message'] ?? ''));
+            if ($msg !== '') {
+                $routePos = stripos($msg, ' routed ');
+                $sentPos = stripos($msg, ' sent ');
+                $pos = $routePos !== false ? $routePos : $sentPos;
+                if ($pos !== false) {
+                    $candidate = trim(substr($msg, 0, $pos));
+                    if ($candidate !== '') {
+                        $sender = $candidate;
+                    }
+                }
+            }
+
             $items[] = [
                 'notificationId' => (string)($row['notification_id'] ?? ''),
                 'documentId' => (string)($row['document_id'] ?? ''),
-                'documentTitle' => trim((string)($row['document_title'] ?? 'Document')),
-                'documentCode' => trim((string)($row['document_code'] ?? '')),
-                'sentByUserName' => trim((string)($row['sent_by_user_name'] ?? 'System')),
+                'documentTitle' => $documentTitle,
+                'documentCode' => trim((string)($row['tracking_code'] ?? '')),
+                'sentByUserName' => $sender,
                 'sentAtFormatted' => $sentAtFormatted,
-                'isRead' => false,
+                'isRead' => !empty($row['is_read']),
             ];
         }
 
@@ -173,21 +164,22 @@ function markDepartmentHeadNotificationRead($config, $notificationId, $ctx = nul
     if (!$pdo) {
         return false;
     }
-    ensureDepartmentHeadNotifColumns($config);
-    if (!is_array($ctx)) {
-        $ctx = departmentHeadNotifContextFromSession();
+    $currentUserId = resolveDepartmentHeadSessionUserId($pdo);
+    if ($currentUserId <= 0) {
+        return false;
     }
-    $params = departmentHeadNotifBindParams($ctx);
-    $params[':id'] = (int)$notificationId;
 
     try {
         $stmt = $pdo->prepare(
-            'UPDATE sent_to_department_heads sth
-             SET sth.read_at = NOW()
-             WHERE sth.id = :id
-               AND ' . departmentHeadRecipientSql('sth')
+            'UPDATE notifications
+             SET is_read = 1
+             WHERE notification_id = :id
+               AND user_id = :user_id'
         );
-        return $stmt->execute($params);
+        return $stmt->execute([
+            ':id' => (int)$notificationId,
+            ':user_id' => $currentUserId,
+        ]);
     } catch (Exception $e) {
         return false;
     }
@@ -198,20 +190,19 @@ function markAllDepartmentHeadNotificationsRead($config, $ctx = null) {
     if (!$pdo) {
         return false;
     }
-    ensureDepartmentHeadNotifColumns($config);
-    if (!is_array($ctx)) {
-        $ctx = departmentHeadNotifContextFromSession();
+    $currentUserId = resolveDepartmentHeadSessionUserId($pdo);
+    if ($currentUserId <= 0) {
+        return false;
     }
-    $params = departmentHeadNotifBindParams($ctx);
 
     try {
         $stmt = $pdo->prepare(
-            'UPDATE sent_to_department_heads sth
-             SET sth.read_at = NOW()
-             WHERE ' . departmentHeadRecipientSql('sth') . '
-               AND sth.read_at IS NULL'
+            'UPDATE notifications
+             SET is_read = 1
+             WHERE user_id = :user_id
+               AND is_read = 0'
         );
-        return $stmt->execute($params);
+        return $stmt->execute([':user_id' => $currentUserId]);
     } catch (Exception $e) {
         return false;
     }

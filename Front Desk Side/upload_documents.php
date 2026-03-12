@@ -16,6 +16,182 @@ if ($userRole === 'superadmin') {
 }
 
 $userName = $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User';
+
+$config = require __DIR__ . '/../config.php';
+require_once __DIR__ . '/../db.php';
+require_once __DIR__ . '/../Super Admin Side/_activity_logger.php';
+require_once __DIR__ . '/../Super Admin Side/_notifications_super_admin.php';
+
+function frontDeskUploadDocumentColumns($pdo) {
+    static $cols = null;
+    if (is_array($cols)) {
+        return $cols;
+    }
+    $cols = [];
+    try {
+        $stmt = $pdo->query('SHOW COLUMNS FROM documents');
+        foreach ($stmt as $row) {
+            $field = strtolower((string)($row['Field'] ?? ''));
+            if ($field !== '') {
+                $cols[$field] = true;
+            }
+        }
+    } catch (Exception $e) {
+        $cols = [];
+    }
+    return $cols;
+}
+
+function frontDeskUploadUserOfficeId($pdo, $userId) {
+    if ((int)$userId <= 0) {
+        return null;
+    }
+    try {
+        $stmt = $pdo->prepare('SELECT office_id FROM users WHERE user_id = :user_id LIMIT 1');
+        $stmt->execute([':user_id' => (int)$userId]);
+        $row = $stmt->fetch();
+        if ($row && !empty($row['office_id'])) {
+            return (int)$row['office_id'];
+        }
+    } catch (Exception $e) {
+        return null;
+    }
+    return null;
+}
+
+$uploadError = trim((string)($_SESSION['frontdesk_upload_error'] ?? ''));
+if ($uploadError !== '') {
+    unset($_SESSION['frontdesk_upload_error']);
+}
+$showUploaded = isset($_GET['uploaded']) && $_GET['uploaded'] === '1';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $documentCode = trim((string)($_POST['document_code'] ?? ''));
+    $documentTitle = trim((string)($_POST['document_title'] ?? ''));
+    $file = $_FILES['document_file'] ?? null;
+
+    if ($documentCode === '' || $documentTitle === '') {
+        $_SESSION['frontdesk_upload_error'] = 'Document code and title are required.';
+        header('Location: upload_documents.php?error=1');
+        exit;
+    }
+    if (!$file || empty($file['tmp_name']) || !is_uploaded_file((string)$file['tmp_name'])) {
+        $_SESSION['frontdesk_upload_error'] = 'Please choose a valid file.';
+        header('Location: upload_documents.php?error=1');
+        exit;
+    }
+    if ((int)($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+        $_SESSION['frontdesk_upload_error'] = 'Upload failed. Please try again.';
+        header('Location: upload_documents.php?error=1');
+        exit;
+    }
+    if ((int)($file['size'] ?? 0) <= 0 || (int)($file['size'] ?? 0) > 10 * 1024 * 1024) {
+        $_SESSION['frontdesk_upload_error'] = 'File must be greater than 0 bytes and at most 10MB.';
+        header('Location: upload_documents.php?error=1');
+        exit;
+    }
+
+    $origName = (string)($file['name'] ?? 'document.bin');
+    $ext = strtolower((string)pathinfo($origName, PATHINFO_EXTENSION));
+    if ($ext !== 'docx') {
+        $_SESSION['frontdesk_upload_error'] = 'Only .docx files are allowed.';
+        header('Location: upload_documents.php?error=1');
+        exit;
+    }
+
+    $mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+    $rootDir = dirname(__DIR__);
+    $storageDir = $rootDir . '/storage/documents';
+    if (!is_dir($storageDir) && !mkdir($storageDir, 0775, true)) {
+        $_SESSION['frontdesk_upload_error'] = 'Could not create document storage directory.';
+        header('Location: upload_documents.php?error=1');
+        exit;
+    }
+
+    $safeOriginal = preg_replace('/[^a-zA-Z0-9._-]/', '_', $origName);
+    $storedFileName = date('Ymd_His') . '_' . substr(bin2hex(random_bytes(6)), 0, 12) . '_' . $safeOriginal;
+    $absolutePath = $storageDir . '/' . $storedFileName;
+    $relativePath = 'storage/documents/' . $storedFileName;
+    if (!move_uploaded_file((string)$file['tmp_name'], $absolutePath)) {
+        $_SESSION['frontdesk_upload_error'] = 'Failed to store uploaded file.';
+        header('Location: upload_documents.php?error=1');
+        exit;
+    }
+
+    try {
+        $pdo = dbPdo($config);
+        $cols = frontDeskUploadDocumentColumns($pdo);
+        if (empty($cols)) {
+            throw new Exception('Documents table is unavailable.');
+        }
+
+        $currentUserId = (int)($_SESSION['user_id'] ?? 0);
+        $officeId = frontDeskUploadUserOfficeId($pdo, $currentUserId);
+        $insertCols = [];
+        $insertVals = [];
+        $params = [];
+
+        $assignMap = [
+            'tracking_code' => $documentCode,
+            'subject' => $documentTitle,
+            'details' => '',
+            'document_code' => $documentCode,
+            'document_title' => $documentTitle,
+            'file_name' => $origName,
+            'mime_type' => $mimeType,
+            'file_size_bytes' => (int)$file['size'],
+            'file_checksum_sha256' => hash_file('sha256', $absolutePath) ?: null,
+            'storage_path' => $relativePath,
+            'status' => 'active',
+            'is_outgoing' => 0,
+            'created_by' => $currentUserId > 0 ? $currentUserId : null,
+            'requestor_office_id' => $officeId,
+            'created_at' => dbNowUtcString(),
+        ];
+
+        foreach ($assignMap as $col => $value) {
+            if (!isset($cols[$col])) {
+                continue;
+            }
+            $insertCols[] = $col;
+            $insertVals[] = ':' . $col;
+            $params[':' . $col] = $value;
+        }
+
+        if (empty($insertCols)) {
+            throw new Exception('No compatible columns found for documents insert.');
+        }
+        $sql = 'INSERT INTO documents (' . implode(', ', $insertCols) . ') VALUES (' . implode(', ', $insertVals) . ')';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $docId = (int)$pdo->lastInsertId();
+
+        activityLog($config, 'document_upload_front_desk', [
+            'module' => 'front_desk_upload',
+            'document_id' => (string)$docId,
+            'tracking_code' => $documentCode,
+            'subject' => $documentTitle,
+        ]);
+        createSuperAdminNotification($config, [
+            'document_id' => $docId,
+            'document_title' => $documentTitle,
+            'sent_by_user_name' => $userName,
+            'notification_type' => 'document_upload',
+            'message' => $userName . ' uploaded a new document: ' . $documentTitle . ' (' . $documentCode . ')',
+            'link' => 'documents.php?highlight=' . $docId,
+        ]);
+        header('Location: upload_documents.php?uploaded=1');
+        exit;
+    } catch (Exception $e) {
+        if (is_file($absolutePath)) {
+            @unlink($absolutePath);
+        }
+        $_SESSION['frontdesk_upload_error'] = 'Failed to save upload: ' . $e->getMessage();
+        header('Location: upload_documents.php?error=1');
+        exit;
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -221,7 +397,7 @@ $userName = $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User';
         }
     </style>
 </head>
-<body class="admin-dashboard upload-page">
+<body class="admin-dashboard upload-page"<?php if ($showUploaded): ?> data-uploaded="1"<?php endif; ?><?php if ($uploadError !== ''): ?> data-upload-error="<?php echo htmlspecialchars($uploadError, ENT_QUOTES); ?>"<?php endif; ?>>
     <div class="admin-body">
         <aside class="admin-sidebar staff-sidebar">
             <div class="sidebar-header staff-sidebar-header">
@@ -295,45 +471,28 @@ $userName = $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User';
                     </div>
                     <div class="upload-card">
                         <h2>Document File</h2>
-                        <p class="upload-card-sub">Upload a PDF, Word document, or image file (max 10MB)</p>
+                        <p class="upload-card-sub">Upload a DOCX file (max 10MB)</p>
                         <div class="upload-drop-zone" id="drop-zone" tabindex="0">
-                            <input type="file" name="document_file" id="document_file" accept=".pdf,.doc,.docx,image/*" required>
+                            <input type="file" name="document_file" id="document_file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required>
                             <svg class="upload-drop-icon" viewBox="0 0 24 24" width="56" height="56" fill="none" stroke="currentColor" stroke-width="2">
                                 <rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="4 2"/>
                                 <path d="M12 16V8M9 11l3-3 3 3"/>
                             </svg>
                             <strong>Drop your file here, or click to browse</strong>
-                            <span class="upload-drop-hint">Supports PDF, Word (.doc, .docx), and images</span>
+                            <span class="upload-drop-hint">Supports Word (.docx) only</span>
                         </div>
                     </div>
 
                     <div class="upload-card">
                         <h2>Document Details</h2>
-                        <p class="upload-card-sub">Provide information about the document</p>
+                        <p class="upload-card-sub">Provide required document information</p>
                         <div class="upload-form-group">
-                            <label for="doc_title">Document Title <span class="required">*</span></label>
-                            <input type="text" id="doc_title" name="doc_title" placeholder="Enter document title" required>
-                        </div>
-                        <div class="upload-form-row">
-                            <div class="upload-form-group">
-                                <label for="doc_type">Document Type</label>
-                                <select id="doc_type" name="doc_type">
-                                    <option value="">Select type</option>
-                                    <option value="memorandum">Memorandum</option>
-                                    <option value="letter">Letter</option>
-                                    <option value="order">Order</option>
-                                    <option value="report">Report</option>
-                                    <option value="other">Other</option>
-                                </select>
-                            </div>
-                            <div class="upload-form-group">
-                                <label for="doc_sender">Sender / Origin</label>
-                                <input type="text" id="doc_sender" name="doc_sender" placeholder="Name or organization">
-                            </div>
+                            <label for="document_code">Document Code <span class="required">*</span></label>
+                            <input type="text" id="document_code" name="document_code" placeholder="e.g., DOC-001" required>
                         </div>
                         <div class="upload-form-group">
-                            <label for="doc_description">Description</label>
-                            <textarea id="doc_description" name="doc_description" placeholder="Brief description of the document content..."></textarea>
+                            <label for="document_title">Document Title <span class="required">*</span></label>
+                            <input type="text" id="document_title" name="document_title" placeholder="Enter document title" required>
                         </div>
                     </div>
                 </form>
@@ -343,6 +502,24 @@ $userName = $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User';
 
     <script>
     (function() {
+        if (document.body.getAttribute('data-uploaded') === '1') {
+            var okToast = document.createElement('div');
+            okToast.setAttribute('role', 'status');
+            okToast.textContent = 'Document uploaded successfully.';
+            okToast.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:1600;padding:0.75rem 1.25rem;background:#22c55e;color:#fff;border-radius:10px;font-size:14px;font-weight:500;box-shadow:0 4px 14px rgba(0,0,0,0.15);';
+            document.body.appendChild(okToast);
+            setTimeout(function() { okToast.remove(); }, 4000);
+        }
+        var uploadErr = document.body.getAttribute('data-upload-error') || '';
+        if (uploadErr) {
+            var errToast = document.createElement('div');
+            errToast.setAttribute('role', 'status');
+            errToast.textContent = uploadErr;
+            errToast.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:1600;padding:0.75rem 1.25rem;background:#dc2626;color:#fff;border-radius:10px;font-size:14px;font-weight:500;box-shadow:0 4px 14px rgba(0,0,0,0.15);max-width:420px;';
+            document.body.appendChild(errToast);
+            setTimeout(function() { errToast.remove(); }, 5000);
+        }
+
         var btn = document.getElementById('profile-logout-btn');
         var dropdown = document.getElementById('profile-dropdown');
         if (btn && dropdown) {

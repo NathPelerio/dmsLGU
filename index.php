@@ -161,7 +161,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['login_type']) && $_PO
                         ], 'blocked');
                     } else {
                         authRateLimiterReset($config, $adminRateScope, $adminRateId, $clientIp);
-                        $_SESSION['user_id'] = (string)($user['id'] ?? '');
+                        $_SESSION['user_id'] = (string)($user['user_id'] ?? ($user['id'] ?? ''));
                         $_SESSION['user_email'] = $user['email'] ?? $username;
                         $_SESSION['user_name'] = $user['name'] ?? $username;
                         $_SESSION['user_username'] = $user['username'] ?? '';
@@ -250,7 +250,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (!isset($_POST['login_type']) || $_
                         ], 'blocked');
                     } else {
                         authRateLimiterReset($config, $staffRateScope, $staffRateId, $clientIp);
-                        $_SESSION['user_id'] = (string)($userArray['id'] ?? '');
+                        $_SESSION['user_id'] = (string)($userArray['user_id'] ?? ($userArray['id'] ?? ''));
                         $_SESSION['user_email'] = $email;
                         $_SESSION['user_name'] = $userArray['name'] ?? $email;
                         $_SESSION['user_username'] = $userArray['username'] ?? '';

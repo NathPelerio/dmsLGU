@@ -39,11 +39,11 @@ function getUsersList($config, $search = '') {
                 'SELECT *
                  FROM users
                  WHERE username LIKE :s OR name LIKE :s OR email LIKE :s
-                 ORDER BY username ASC'
+                 ORDER BY COALESCE(NULLIF(username, \'\'), NULLIF(name, \'\'), email) ASC'
             );
             $stmt->execute([':s' => $like]);
         } else {
-            $stmt = $pdo->query('SELECT * FROM users ORDER BY username ASC');
+            $stmt = $pdo->query('SELECT * FROM users ORDER BY COALESCE(NULLIF(username, \'\'), NULLIF(name, \'\'), email) ASC');
         }
         return $stmt->fetchAll();
     } catch (Exception $e) {
@@ -58,7 +58,17 @@ function getUsersList($config, $search = '') {
 function getOfficeLookupMaps($config) {
     try {
         $pdo = dbPdo($config);
-        $stmt = $pdo->query('SELECT id, office_name, office_head_id FROM offices');
+        $stmt = $pdo->query(
+            "SELECT
+                o.office_id AS id,
+                o.office_name,
+                h.user_id AS office_head_id
+             FROM offices o
+             LEFT JOIN users h
+                ON h.office_id = o.office_id
+               AND LOWER(TRIM(h.role)) IN ('departmenthead', 'department_head', 'dept_head')
+             ORDER BY o.office_name ASC, h.user_id ASC"
+        );
         $rows = $stmt->fetchAll();
         $officeNameById = [];
         $officeNameByHeadUserId = [];
@@ -125,7 +135,7 @@ function addUser($config, $username, $name, $email, $password, $role) {
     }
     try {
         $pdo = dbPdo($config);
-        $check = $pdo->prepare('SELECT id FROM users WHERE username = :username OR email = :email LIMIT 1');
+        $check = $pdo->prepare('SELECT user_id FROM users WHERE username = :username OR email = :email LIMIT 1');
         $check->execute([':username' => $username, ':email' => $email]);
         if ($check->fetch()) {
             return ['success' => false, 'message' => 'Username or email already exists.'];
@@ -215,7 +225,7 @@ function updateUserAccountState($config, $targetUserId, $mode, $reason, $duratio
                  SET account_state = :state, disabled_reason = :disabled_reason, disabled_at = :disabled_at,
                     suspend_reason = NULL, suspended_at = NULL, suspended_mono_ns = NULL, suspended_until = NULL,
                      suspend_duration_value = NULL, suspend_duration_unit = NULL, updated_at = :updated_at
-                 WHERE id = :id'
+                 WHERE user_id = :id'
             );
             $ok = $stmt->execute([
                 ':state' => 'disabled',
@@ -242,7 +252,7 @@ function updateUserAccountState($config, $targetUserId, $mode, $reason, $duratio
                     suspended_mono_ns = :suspended_mono_ns, suspended_until = :suspended_until, suspend_duration_value = :duration_value,
                      suspend_duration_unit = :duration_unit, disabled_reason = NULL, disabled_at = NULL,
                      updated_at = :updated_at
-                 WHERE id = :id'
+                 WHERE user_id = :id'
             );
             $ok = $stmt->execute([
                 ':state' => 'suspended',
@@ -261,7 +271,7 @@ function updateUserAccountState($config, $targetUserId, $mode, $reason, $duratio
                  SET account_state = :state, enabled_at = :enabled_at, disabled_reason = NULL, disabled_at = NULL,
                     suspend_reason = NULL, suspended_at = NULL, suspended_mono_ns = NULL, suspended_until = NULL,
                      suspend_duration_value = NULL, suspend_duration_unit = NULL, updated_at = :updated_at
-                 WHERE id = :id'
+                 WHERE user_id = :id'
             );
             $ok = $stmt->execute([
                 ':state' => 'active',
@@ -361,7 +371,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         try {
             $pdo = dbPdo($config);
-            $userStmt = $pdo->prepare('SELECT email FROM users WHERE id = :id LIMIT 1');
+            $userStmt = $pdo->prepare('SELECT email FROM users WHERE user_id = :id LIMIT 1');
             $userStmt->execute([':id' => $userId]);
             $existingUser = $userStmt->fetch() ?: null;
         } catch (Exception $e) {
@@ -554,7 +564,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($editModalData['user_id'] !== '') {
             try {
                 $pdo = dbPdo($config);
-                $currentUserStmt = $pdo->prepare('SELECT email FROM users WHERE id = :id LIMIT 1');
+                $currentUserStmt = $pdo->prepare('SELECT email FROM users WHERE user_id = :id LIMIT 1');
                 $currentUserStmt->execute([':id' => $editModalData['user_id']]);
                 $currentUser = $currentUserStmt->fetch() ?: null;
                 $editOriginalEmail = trim((string)($currentUser['email'] ?? ''));
@@ -598,7 +608,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             try {
                 $pdo = dbPdo($config);
-                $check = $pdo->prepare('SELECT id FROM users WHERE (username = :username OR email = :email) AND id <> :id LIMIT 1');
+                $check = $pdo->prepare('SELECT user_id FROM users WHERE (username = :username OR email = :email) AND user_id <> :id LIMIT 1');
                 $check->execute([
                     ':username' => $editModalData['username'],
                     ':email' => $editModalData['email'],
@@ -613,7 +623,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             'UPDATE users
                              SET username = :username, name = :name, email = :email, role = :role,
                                  password = :password, updated_at = :updated_at
-                             WHERE id = :id'
+                             WHERE user_id = :id'
                         );
                         $ok = $stmt->execute([
                             ':username' => $editModalData['username'],
@@ -628,7 +638,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $stmt = $pdo->prepare(
                             'UPDATE users
                              SET username = :username, name = :name, email = :email, role = :role, updated_at = :updated_at
-                             WHERE id = :id'
+                             WHERE user_id = :id'
                         );
                         $ok = $stmt->execute([
                             ':username' => $editModalData['username'],
@@ -1111,7 +1121,7 @@ function getUserAccountStatusMeta($u) {
                                             }
                                         }
                                         if ($dept === '') {
-                                            $currentUserId = trim((string)($u['id'] ?? $u['_id'] ?? ''));
+                                            $currentUserId = trim((string)($u['user_id'] ?? $u['id'] ?? $u['_id'] ?? ''));
                                             if ($currentUserId !== '' && isset($officeNameByHeadUserId[$currentUserId])) {
                                                 $dept = $officeNameByHeadUserId[$currentUserId];
                                             }
@@ -1142,7 +1152,7 @@ function getUserAccountStatusMeta($u) {
                                     <td class="users-action-cell">
                                         <div class="users-action-stack">
                                             <button type="button" class="users-action-btn js-edit-user-btn" title="Edit user"
-                                                data-user-id="<?= htmlspecialchars($u['id'] ?? $u['_id'] ?? '') ?>"
+                                                data-user-id="<?= htmlspecialchars($u['user_id'] ?? $u['id'] ?? $u['_id'] ?? '') ?>"
                                                 data-username="<?= htmlspecialchars(trim((string)($u['username'] ?? '')) ?: trim((string)($u['email'] ?? '')) ) ?>"
                                                 data-name="<?= htmlspecialchars(trim((string)($u['name'] ?? '')) ) ?>"
                                                 data-email="<?= htmlspecialchars(trim((string)($u['email'] ?? '')) ) ?>"
@@ -1153,13 +1163,13 @@ function getUserAccountStatusMeta($u) {
                                             <?php if ($showEnableBtn): ?>
                                             <form method="post" style="display:inline;" onsubmit="return confirm('Enable this account? The user will be able to login again.');">
                                                 <input type="hidden" name="action" value="enable_user">
-                                                <input type="hidden" name="user_id" value="<?= htmlspecialchars($u['id'] ?? $u['_id'] ?? '') ?>">
+                                                <input type="hidden" name="user_id" value="<?= htmlspecialchars($u['user_id'] ?? $u['id'] ?? $u['_id'] ?? '') ?>">
                                                 <input type="hidden" name="target_name" value="<?= htmlspecialchars($displayName) ?>">
                                                 <button type="submit" class="users-action-btn enable" title="Enable user">Enable</button>
                                             </form>
                                             <?php else: ?>
-                                            <button type="button" class="users-action-btn disable js-disable-user-btn" data-user-id="<?= htmlspecialchars($u['id'] ?? $u['_id'] ?? '') ?>" data-user-name="<?= htmlspecialchars($displayName) ?>" title="Disable user">Disable</button>
-                                            <button type="button" class="users-action-btn suspend js-suspend-user-btn" data-user-id="<?= htmlspecialchars($u['id'] ?? $u['_id'] ?? '') ?>" data-user-name="<?= htmlspecialchars($displayName) ?>" title="Suspend user">Suspend</button>
+                                            <button type="button" class="users-action-btn disable js-disable-user-btn" data-user-id="<?= htmlspecialchars($u['user_id'] ?? $u['id'] ?? $u['_id'] ?? '') ?>" data-user-name="<?= htmlspecialchars($displayName) ?>" title="Disable user">Disable</button>
+                                            <button type="button" class="users-action-btn suspend js-suspend-user-btn" data-user-id="<?= htmlspecialchars($u['user_id'] ?? $u['id'] ?? $u['_id'] ?? '') ?>" data-user-name="<?= htmlspecialchars($displayName) ?>" title="Suspend user">Suspend</button>
                                             <?php endif; ?>
                                         </div>
                                     </td>
