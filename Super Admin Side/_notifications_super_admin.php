@@ -1,6 +1,6 @@
 <?php
 /**
- * Super Admin notifications backed by MySQL.
+ * Super Admin notifications backed by the normalized notifications table.
  * Returns count and list for badge + dropdown.
  */
 
@@ -32,40 +32,7 @@ function superAdminNotificationPdo($config = null) {
 }
 
 function ensureSuperAdminStampColumns($config = null) {
-    static $checked = false;
-    if ($checked) {
-        return;
-    }
-    $checked = true;
-    $pdo = superAdminNotificationPdo($config);
-    if (!$pdo) {
-        return;
-    }
-    try {
-        $tables = ['super_admin_notifications', 'sent_to_super_admin', 'sent_to_admin'];
-        foreach ($tables as $table) {
-            $cols = [];
-            $stmt = $pdo->query('SHOW COLUMNS FROM ' . $table);
-            foreach ($stmt as $row) {
-                $name = strtolower((string)($row['Field'] ?? ''));
-                if ($name !== '') $cols[$name] = true;
-            }
-            if (!isset($cols['stamp_image'])) {
-                $pdo->exec('ALTER TABLE ' . $table . ' ADD COLUMN stamp_image LONGTEXT NULL AFTER file_name');
-            }
-            if (!isset($cols['stamp_width_pct'])) {
-                $pdo->exec('ALTER TABLE ' . $table . ' ADD COLUMN stamp_width_pct DECIMAL(5,2) NOT NULL DEFAULT 18.00 AFTER stamp_image');
-            }
-            if (!isset($cols['stamp_x_pct'])) {
-                $pdo->exec('ALTER TABLE ' . $table . ' ADD COLUMN stamp_x_pct DECIMAL(5,2) NOT NULL DEFAULT 82.00 AFTER stamp_width_pct');
-            }
-            if (!isset($cols['stamp_y_pct'])) {
-                $pdo->exec('ALTER TABLE ' . $table . ' ADD COLUMN stamp_y_pct DECIMAL(5,2) NOT NULL DEFAULT 84.00 AFTER stamp_x_pct');
-            }
-        }
-    } catch (Exception $e) {
-        // Best-effort migration.
-    }
+    // Kept as a no-op for backward compatibility with existing callers.
 }
 
 /**
@@ -79,27 +46,64 @@ function createSuperAdminNotification($config, $data) {
     if (!$pdo) {
         return false;
     }
-    ensureSuperAdminStampColumns($config);
 
     try {
-        $stmt = $pdo->prepare(
-            'INSERT INTO super_admin_notifications
-                (document_id, document_code, document_title, file_name, stamp_image, stamp_width_pct, stamp_x_pct, stamp_y_pct, sent_by_user_id, sent_by_user_name, sent_at)
-             VALUES
-                (:document_id, :document_code, :document_title, :file_name, :stamp_image, :stamp_width_pct, :stamp_x_pct, :stamp_y_pct, :sent_by_user_id, :sent_by_user_name, NOW())'
+        $documentId = (int)($data['document_id'] ?? 0);
+        $documentTitle = trim((string)($data['document_title'] ?? 'Document'));
+        if ($documentTitle === '') {
+            $documentTitle = 'Document';
+        }
+        $sender = trim((string)($data['sent_by_user_name'] ?? 'User'));
+        if ($sender === '') {
+            $sender = 'User';
+        }
+        $message = trim((string)($data['message'] ?? ''));
+        if ($message === '') {
+            $message = $sender . ' sent ' . $documentTitle;
+        }
+        $link = trim((string)($data['link'] ?? ''));
+        if ($link === '') {
+            $link = 'documents.php?highlight=' . $documentId;
+        }
+        $notificationType = trim((string)($data['notification_type'] ?? ''));
+        if ($notificationType === '') {
+            $notificationType = 'to_super_admin';
+        }
+
+        // Fan out to all super admin users.
+        $superAdminIds = [];
+        $uStmt = $pdo->query(
+            "SELECT user_id
+             FROM users
+             WHERE LOWER(TRIM(role)) IN ('superadmin', 'super_admin')
+             ORDER BY user_id ASC"
         );
-        return $stmt->execute([
-            ':document_id' => (string)($data['document_id'] ?? ''),
-            ':document_code' => (string)($data['document_code'] ?? ''),
-            ':document_title' => (string)($data['document_title'] ?? 'Document'),
-            ':file_name' => (string)($data['file_name'] ?? 'document.docx'),
-            ':stamp_image' => (string)($data['stamp_image'] ?? ''),
-            ':stamp_width_pct' => (float)($data['stamp_width_pct'] ?? 18),
-            ':stamp_x_pct' => (float)($data['stamp_x_pct'] ?? 82),
-            ':stamp_y_pct' => (float)($data['stamp_y_pct'] ?? 84),
-            ':sent_by_user_id' => (string)($data['sent_by_user_id'] ?? ''),
-            ':sent_by_user_name' => (string)($data['sent_by_user_name'] ?? 'User'),
-        ]);
+        foreach ($uStmt as $row) {
+            $uid = (int)($row['user_id'] ?? 0);
+            if ($uid > 0) {
+                $superAdminIds[] = $uid;
+            }
+        }
+        if (empty($superAdminIds)) {
+            return false;
+        }
+
+        $ins = $pdo->prepare(
+            'INSERT INTO notifications
+                (user_id, document_id, notification_type, message, link, is_read, created_at)
+             VALUES
+                (:user_id, :document_id, :notification_type, :message, :link, 0, NOW())'
+        );
+        foreach ($superAdminIds as $superAdminId) {
+            $ins->execute([
+                ':user_id' => $superAdminId,
+                ':document_id' => $documentId > 0 ? $documentId : null,
+                ':notification_type' => $notificationType,
+                ':message' => $message,
+                ':link' => $link,
+            ]);
+        }
+        return true;
     } catch (Exception $e) {
         return false;
     }
@@ -119,9 +123,9 @@ function markSuperAdminNotificationRead($config, $notificationId) {
 
     try {
         $stmt = $pdo->prepare(
-            'UPDATE super_admin_notifications
-             SET read_at = NOW()
-             WHERE id = :id'
+            'UPDATE notifications
+             SET is_read = 1
+             WHERE notification_id = :id'
         );
         return $stmt->execute([':id' => (int)$notificationId]);
     } catch (Exception $e) {
@@ -139,26 +143,48 @@ function getSuperAdminNotifications($config = null) {
     if (!$pdo) {
         return ['count' => 0, 'items' => []];
     }
-    ensureSuperAdminStampColumns($config);
 
     try {
-        $unreadStmt = $pdo->query('SELECT COUNT(*) AS unread_count FROM super_admin_notifications WHERE read_at IS NULL');
+        $currentUserId = (int)($_SESSION['user_id'] ?? 0);
+        if ($currentUserId <= 0) {
+            return ['count' => 0, 'items' => []];
+        }
+
+        $unreadStmt = $pdo->prepare(
+            'SELECT COUNT(*) AS unread_count
+             FROM notifications
+             WHERE user_id = :user_id
+               AND is_read = 0'
+        );
+        $unreadStmt->execute([':user_id' => $currentUserId]);
         $unreadRow = $unreadStmt->fetch();
         $unreadCount = (int)($unreadRow['unread_count'] ?? 0);
 
-        $stmt = $pdo->query(
-            'SELECT id, document_id, document_code, document_title, sent_by_user_name, sent_at, read_at
-             FROM super_admin_notifications
-             ORDER BY sent_at DESC
+        $stmt = $pdo->prepare(
+            'SELECT
+                n.notification_id,
+                n.document_id,
+                n.notification_type,
+                n.message,
+                n.link,
+                n.is_read,
+                n.created_at,
+                d.subject,
+                d.tracking_code
+             FROM notifications n
+             LEFT JOIN documents d ON d.document_id = n.document_id
+             WHERE n.user_id = :user_id
+             ORDER BY n.created_at DESC
              LIMIT 20'
         );
+        $stmt->execute([':user_id' => $currentUserId]);
 
         $items = [];
         foreach ($stmt as $row) {
             $sentAtFormatted = '—';
-            if (!empty($row['sent_at'])) {
+            if (!empty($row['created_at'])) {
                 try {
-                    $dt = new DateTime((string)$row['sent_at']);
+                    $dt = new DateTime((string)$row['created_at']);
                     $dt->setTimezone(new DateTimeZone('Asia/Manila'));
                     $sentAtFormatted = $dt->format('M j, Y g:i A');
                 } catch (Exception $e) {
@@ -166,14 +192,35 @@ function getSuperAdminNotifications($config = null) {
                 }
             }
 
+            $documentTitle = trim((string)($row['subject'] ?? ''));
+            if ($documentTitle === '') {
+                $documentTitle = trim((string)($row['message'] ?? 'Document'));
+            }
+            if ($documentTitle === '') {
+                $documentTitle = 'Document';
+            }
+
+            $trackingCode = trim((string)($row['tracking_code'] ?? ''));
+            $sender = 'System';
+            $msg = trim((string)($row['message'] ?? ''));
+            if ($msg !== '') {
+                $sentPos = stripos($msg, ' sent ');
+                if ($sentPos !== false) {
+                    $candidate = trim(substr($msg, 0, $sentPos));
+                    if ($candidate !== '') {
+                        $sender = $candidate;
+                    }
+                }
+            }
+
             $items[] = [
-                'notificationId' => (string)($row['id'] ?? ''),
+                'notificationId' => (string)($row['notification_id'] ?? ''),
                 'documentId' => (string)($row['document_id'] ?? ''),
-                'documentTitle' => trim((string)($row['document_title'] ?? 'Document')),
-                'documentCode' => trim((string)($row['document_code'] ?? '')),
-                'sentByUserName' => trim((string)($row['sent_by_user_name'] ?? 'Someone')),
+                'documentTitle' => $documentTitle,
+                'documentCode' => $trackingCode,
+                'sentByUserName' => $sender,
                 'sentAtFormatted' => $sentAtFormatted,
-                'isRead' => !empty($row['read_at']),
+                'isRead' => !empty($row['is_read']),
             ];
         }
 

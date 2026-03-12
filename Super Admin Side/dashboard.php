@@ -69,9 +69,10 @@ try {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="assets/css/styles.css">
-    <link rel="stylesheet" href="assets/css/profile_modal_super_admin.css">
     <link rel="stylesheet" href="../Admin%20Side/assets/css/admin-dashboard.css">
     <link rel="stylesheet" href="assets/css/sidebar_super_admin.css">
+    <?php $profileModalCssVer = @filemtime(__DIR__ . '/assets/css/profile_modal_super_admin.css') ?: time(); ?>
+    <link rel="stylesheet" href="assets/css/profile_modal_super_admin.css?v=<?= (int)$profileModalCssVer ?>">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         /* Same font as sidebar: Inter for full dashboard consistency */
@@ -134,12 +135,6 @@ try {
                     </div>
                 </div>
                 <div class="admin-content-body" id="admin-content-body">
-                    <div class="dashboard-upload-row">
-                        <a href="documents.php" class="btn-upload-document">
-                            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                            Upload Document
-                        </a>
-                    </div>
                     <div class="dashboard-metrics">
                         <div class="metric-card">
                             <span class="metric-label">TOTAL DOCUMENTS</span>
@@ -211,11 +206,16 @@ try {
                                     <?php else: ?>
                                     <?php foreach ($recentDocuments as $doc): ?>
                                     <?php
-                                        $controlNo = isset($doc['controlNo']) ? htmlspecialchars($doc['controlNo']) : (isset($doc['control_no']) ? htmlspecialchars($doc['control_no']) : '—');
+                                        $controlNo = isset($doc['tracking_code']) ? htmlspecialchars($doc['tracking_code']) : (isset($doc['controlNo']) ? htmlspecialchars($doc['controlNo']) : (isset($doc['control_no']) ? htmlspecialchars($doc['control_no']) : '—'));
                                         $title = isset($doc['title']) ? htmlspecialchars($doc['title']) : (isset($doc['subject']) ? htmlspecialchars($doc['subject']) : '—');
                                         $status = isset($doc['status']) ? htmlspecialchars($doc['status']) : 'Pending';
                                         $date = '—';
-                                        if (isset($doc['createdAt'])) {
+                                        if (isset($doc['created_at'])) {
+                                            $dt = $doc['created_at'];
+                                            if (is_string($dt)) {
+                                                $date = date('M j, Y', strtotime($dt));
+                                            }
+                                        } elseif (isset($doc['createdAt'])) {
                                             $dt = $doc['createdAt'];
                                             if ($dt instanceof DateTimeInterface) {
                                                 $date = $dt->format('M j, Y');

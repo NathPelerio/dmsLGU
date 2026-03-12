@@ -24,19 +24,136 @@ $notifData = getSuperAdminNotifications($config);
 $notifCount = $notifData['count'];
 $notifItems = $notifData['items'];
 
-// View document (return docx for in-browser viewer – no download)
-if (!empty($_GET['view']) && preg_match('/^[a-f0-9]{24}$/i', $_GET['view'])) {
+function documentTableColumns($pdo) {
+    static $cols = null;
+    if (is_array($cols)) {
+        return $cols;
+    }
+    $cols = [];
+    try {
+        $stmt = $pdo->query('SHOW COLUMNS FROM documents');
+        foreach ($stmt as $row) {
+            $field = strtolower((string)($row['Field'] ?? ''));
+            if ($field !== '') {
+                $cols[$field] = true;
+            }
+        }
+    } catch (Exception $e) {
+        $cols = [];
+    }
+    return $cols;
+}
+
+function superAdminDocMimeFromName($name, $fallback = 'application/octet-stream') {
+    $ext = strtolower((string)pathinfo((string)$name, PATHINFO_EXTENSION));
+    if (in_array($ext, ['jpg', 'jpeg'], true)) return 'image/jpeg';
+    if ($ext === 'png') return 'image/png';
+    if ($ext === 'gif') return 'image/gif';
+    if ($ext === 'webp') return 'image/webp';
+    if ($ext === 'pdf') return 'application/pdf';
+    if ($ext === 'doc') return 'application/msword';
+    if ($ext === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    return $fallback;
+}
+
+function getDocumentFilePayload($pdo, $documentId) {
+    $cols = documentTableColumns($pdo);
+    if (empty($cols)) {
+        return null;
+    }
+    $idCol = isset($cols['document_id']) ? 'document_id' : 'id';
+    $selectCols = [];
+    foreach (['file_name', 'mime_type', 'storage_path', 'file_content'] as $col) {
+        if (isset($cols[$col])) {
+            $selectCols[] = $col;
+        }
+    }
+    if (empty($selectCols)) {
+        return null;
+    }
+    $sql = 'SELECT ' . implode(', ', $selectCols) . ' FROM documents WHERE ' . $idCol . ' = :id LIMIT 1';
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([':id' => (int)$documentId]);
+    $row = $stmt->fetch();
+    if (!$row) {
+        return null;
+    }
+    return [
+        'file_name' => (string)($row['file_name'] ?? 'document.bin'),
+        'mime_type' => (string)($row['mime_type'] ?? ''),
+        'storage_path' => (string)($row['storage_path'] ?? ''),
+        'file_content' => (string)($row['file_content'] ?? ''),
+    ];
+}
+
+function resolveSuperAdminSessionUserId($pdo) {
+    $rawId = trim((string)($_SESSION['user_id'] ?? ''));
+    if ($rawId !== '' && ctype_digit($rawId)) {
+        return (int)$rawId;
+    }
+    $email = trim((string)($_SESSION['user_email'] ?? ''));
+    $username = trim((string)($_SESSION['user_username'] ?? ''));
+    $name = trim((string)($_SESSION['user_name'] ?? ''));
+    try {
+        if ($email !== '') {
+            $stmt = $pdo->prepare('SELECT user_id FROM users WHERE LOWER(email) = LOWER(:email) LIMIT 1');
+            $stmt->execute([':email' => $email]);
+            $row = $stmt->fetch();
+            if ($row && !empty($row['user_id'])) {
+                $_SESSION['user_id'] = (string)$row['user_id'];
+                return (int)$row['user_id'];
+            }
+        }
+        if ($username !== '') {
+            $stmt = $pdo->prepare('SELECT user_id FROM users WHERE LOWER(username) = LOWER(:username) LIMIT 1');
+            $stmt->execute([':username' => $username]);
+            $row = $stmt->fetch();
+            if ($row && !empty($row['user_id'])) {
+                $_SESSION['user_id'] = (string)$row['user_id'];
+                return (int)$row['user_id'];
+            }
+        }
+        if ($name !== '') {
+            $stmt = $pdo->prepare('SELECT user_id FROM users WHERE LOWER(name) = LOWER(:name) LIMIT 1');
+            $stmt->execute([':name' => $name]);
+            $row = $stmt->fetch();
+            if ($row && !empty($row['user_id'])) {
+                $_SESSION['user_id'] = (string)$row['user_id'];
+                return (int)$row['user_id'];
+            }
+        }
+    } catch (Exception $e) {
+        return 0;
+    }
+    return 0;
+}
+
+// View document (in-browser)
+if (!empty($_GET['view']) && preg_match('/^\d+$/', (string)$_GET['view'])) {
     try {
         $pdo = dbPdo($config);
-        $stmt = $pdo->prepare('SELECT file_name, file_content FROM documents WHERE id = :id LIMIT 1');
-        $stmt->execute([':id' => $_GET['view']]);
-        $doc = $stmt->fetch();
+        $doc = getDocumentFilePayload($pdo, $_GET['view']);
         if ($doc) {
-            $fileName = $doc['file_name'] ?? 'document.docx';
-            $fileContent = $doc['file_content'] ?? '';
+            $fileName = (string)($doc['file_name'] ?? 'document.bin');
+            $mimeType = trim((string)($doc['mime_type'] ?? ''));
+            if ($mimeType === '') {
+                $mimeType = superAdminDocMimeFromName($fileName);
+            }
+            $safeFileName = preg_replace('/[^a-zA-Z0-9._-]/', '_', $fileName);
+            $storagePath = trim((string)($doc['storage_path'] ?? ''));
+            if ($storagePath !== '') {
+                $absPath = dirname(__DIR__) . '/' . ltrim(str_replace('\\', '/', $storagePath), '/');
+                if (is_file($absPath) && is_readable($absPath)) {
+                    header('Content-Type: ' . $mimeType);
+                    header('Content-Disposition: inline; filename="' . $safeFileName . '"');
+                    readfile($absPath);
+                    exit;
+                }
+            }
+            $fileContent = (string)($doc['file_content'] ?? '');
             if ($fileContent !== '') {
-                header('Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-                header('Content-Disposition: inline; filename="' . preg_replace('/[^a-zA-Z0-9._-]/', '_', $fileName) . '"');
+                header('Content-Type: ' . $mimeType);
+                header('Content-Disposition: inline; filename="' . $safeFileName . '"');
                 echo base64_decode($fileContent, true) ?: $fileContent;
                 exit;
             }
@@ -46,19 +163,32 @@ if (!empty($_GET['view']) && preg_match('/^[a-f0-9]{24}$/i', $_GET['view'])) {
     exit;
 }
 
-// Download document (file stored in documents collection)
-if (!empty($_GET['download']) && preg_match('/^[a-f0-9]{24}$/i', $_GET['download'])) {
+// Download document
+if (!empty($_GET['download']) && preg_match('/^\d+$/', (string)$_GET['download'])) {
     try {
         $pdo = dbPdo($config);
-        $stmt = $pdo->prepare('SELECT file_name, file_content FROM documents WHERE id = :id LIMIT 1');
-        $stmt->execute([':id' => $_GET['download']]);
-        $doc = $stmt->fetch();
+        $doc = getDocumentFilePayload($pdo, $_GET['download']);
         if ($doc) {
-            $fileName = $doc['file_name'] ?? 'document.docx';
-            $fileContent = $doc['file_content'] ?? '';
+            $fileName = (string)($doc['file_name'] ?? 'document.bin');
+            $mimeType = trim((string)($doc['mime_type'] ?? ''));
+            if ($mimeType === '') {
+                $mimeType = superAdminDocMimeFromName($fileName);
+            }
+            $safeFileName = preg_replace('/[^a-zA-Z0-9._-]/', '_', $fileName);
+            $storagePath = trim((string)($doc['storage_path'] ?? ''));
+            if ($storagePath !== '') {
+                $absPath = dirname(__DIR__) . '/' . ltrim(str_replace('\\', '/', $storagePath), '/');
+                if (is_file($absPath) && is_readable($absPath)) {
+                    header('Content-Type: ' . $mimeType);
+                    header('Content-Disposition: attachment; filename="' . $safeFileName . '"');
+                    readfile($absPath);
+                    exit;
+                }
+            }
+            $fileContent = (string)($doc['file_content'] ?? '');
             if ($fileContent !== '') {
-                header('Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-                header('Content-Disposition: attachment; filename="' . preg_replace('/[^a-zA-Z0-9._-]/', '_', $fileName) . '"');
+                header('Content-Type: ' . $mimeType);
+                header('Content-Disposition: attachment; filename="' . $safeFileName . '"');
                 echo base64_decode($fileContent, true) ?: $fileContent;
                 exit;
             }
@@ -111,15 +241,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $stampY = max(5, min(95, (float)($_POST['stamp_y_pct'] ?? 84)));
     $postedStampImage = trim((string)($_POST['stamp_image_data'] ?? ''));
     $postedNotes = trim((string)($_POST['notes'] ?? ''));
-    if (!preg_match('/^[a-f0-9]{24}$/i', $sendId)) {
+    if (!preg_match('/^\d+$/', $sendId)) {
         header('Location: documents.php?send_error=1');
         exit;
     }
     try {
         $pdo = dbPdo($config);
+        $sessionUserId = resolveSuperAdminSessionUserId($pdo);
         ensureSuperAdminStampColumns($config);
-        $docStmt = $pdo->prepare('SELECT document_code, document_title, file_name FROM documents WHERE id = :id LIMIT 1');
-        $docStmt->execute([':id' => $sendId]);
+        $docCols = documentTableColumns($pdo);
+        $docIdCol = isset($docCols['document_id']) ? 'document_id' : 'id';
+        $docCodeExpr = isset($docCols['tracking_code']) ? 'tracking_code' : (isset($docCols['document_code']) ? 'document_code' : "''");
+        $docTitleExpr = isset($docCols['subject']) ? 'subject' : (isset($docCols['document_title']) ? 'document_title' : "''");
+        $docFileExpr = isset($docCols['file_name']) ? 'file_name' : "''";
+        $docStmt = $pdo->prepare(
+            'SELECT
+                ' . $docCodeExpr . ' AS document_code,
+                ' . $docTitleExpr . ' AS document_title,
+                ' . $docFileExpr . ' AS file_name
+             FROM documents
+             WHERE ' . $docIdCol . ' = :id
+             LIMIT 1'
+        );
+        $docStmt->execute([':id' => (int)$sendId]);
         $doc = $docStmt->fetch();
         if ($doc) {
             $docCode = $doc['document_code'] ?? '';
@@ -129,7 +273,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             if ($postedStampImage !== '' && preg_match('/^data:image\/[a-zA-Z0-9.+-]+;base64,/', $postedStampImage)) {
                 $stampImage = $postedStampImage;
             } else {
-                $stampCfg = getUserStampConfig($_SESSION['user_id'] ?? '');
+                $stampCfg = getUserStampConfig($sessionUserId > 0 ? (string)$sessionUserId : '');
                 $stampImage = trim((string)($stampCfg['stamp'] ?? ''));
             }
             if ($stampImage === '') {
@@ -151,13 +295,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 ':stamp_width_pct' => $stampWidth,
                 ':stamp_x_pct' => $stampX,
                 ':stamp_y_pct' => $stampY,
-                ':sent_by_user_id' => (($_SESSION['user_id'] ?? '') !== '' ? $_SESSION['user_id'] : null),
+                ':sent_by_user_id' => $sessionUserId > 0 ? $sessionUserId : null,
                 ':sent_by_user_name' => $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User',
                 ':sent_at' => dbNowUtcString(),
             ]);
             if ($postedNotes !== '') {
-                $noteUp = $pdo->prepare('UPDATE documents SET notes = :notes, updated_at = :updated_at WHERE id = :id');
-                $noteUp->execute([':notes' => $postedNotes, ':updated_at' => dbNowUtcString(), ':id' => $sendId]);
+                $noteUp = $pdo->prepare('UPDATE documents SET notes = :notes, updated_at = :updated_at WHERE ' . $docIdCol . ' = :id');
+                $noteUp->execute([':notes' => $postedNotes, ':updated_at' => dbNowUtcString(), ':id' => (int)$sendId]);
             }
             activityLog($config, 'document_send_to_admin', [
                 'module' => 'super_admin_documents',
@@ -184,19 +328,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     if ($docId !== '' && count($officeIds) > 0) {
         try {
             $pdo = dbPdo($config);
-            $docStmt = $pdo->prepare('SELECT id FROM documents WHERE id = :id LIMIT 1');
-            $docStmt->execute([':id' => $docId]);
+            $sessionUserId = resolveSuperAdminSessionUserId($pdo);
+            $docCols = documentTableColumns($pdo);
+            $docIdCol = isset($docCols['document_id']) ? 'document_id' : 'id';
+            $docStmt = $pdo->prepare('SELECT 1 FROM documents WHERE ' . $docIdCol . ' = :id LIMIT 1');
+            $docStmt->execute([':id' => (int)$docId]);
             if ($docStmt->fetch()) {
                 $sentCount = 0;
-                $ins = $pdo->prepare(
-                    'INSERT INTO sent_to_department_heads
-                        (document_id, office_id, office_name, office_head_id, office_head_name, sent_at, sent_by_user_id, sent_by_user_name)
+                $routeIns = $pdo->prepare(
+                    'INSERT INTO document_routes
+                        (document_id, from_user_id, to_user_id, to_office_id, status, remarks, route_date)
                      VALUES
-                        (:document_id, :office_id, :office_name, :office_head_id, :office_head_name, :sent_at, :sent_by_user_id, :sent_by_user_name)'
+                        (:document_id, :from_user_id, :to_user_id, :to_office_id, :status, :remarks, :route_date)'
+                );
+                $notifIns = $pdo->prepare(
+                    'INSERT INTO notifications
+                        (user_id, document_id, notification_type, message, link, is_read, created_at)
+                     VALUES
+                        (:user_id, :document_id, :notification_type, :message, :link, 0, :created_at)'
                 );
                 foreach ($officeIds as $officeId) {
-                    $officeStmt = $pdo->prepare('SELECT * FROM offices WHERE id = :id LIMIT 1');
-                    $officeStmt->execute([':id' => $officeId]);
+                    $officeStmt = $pdo->prepare(
+                        "SELECT
+                            o.office_id,
+                            o.office_name,
+                            o.office_code,
+                            h.user_id AS office_head_id,
+                            COALESCE(NULLIF(h.username, ''), NULLIF(h.name, ''), h.email) AS office_head
+                         FROM offices o
+                         LEFT JOIN users h
+                            ON h.office_id = o.office_id
+                           AND LOWER(TRIM(h.role)) IN ('departmenthead', 'department_head', 'dept_head')
+                         WHERE o.office_id = :id
+                         ORDER BY h.user_id ASC
+                         LIMIT 1"
+                    );
+                    $officeStmt->execute([':id' => (int)$officeId]);
                     $office = $officeStmt->fetch();
                     if (!$office) continue;
 
@@ -206,25 +373,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $officeName = trim((string)($office['office_name'] ?? $office['office_code'] ?? 'Department'));
                     if ($officeHeadId === null && $officeHeadName === '') continue;
 
-                    $rawUserId = $_SESSION['user_id'] ?? null;
-                    $sentByUserId = ($rawUserId !== null && (string)$rawUserId !== '') ? $rawUserId : null;
-
-                    $ins->execute([
-                        ':document_id' => $docId,
-                        ':office_id' => $officeId,
-                        ':office_name' => $officeName,
-                        ':office_head_id' => $officeHeadId,
-                        ':office_head_name' => $officeHeadName,
-                        ':sent_at' => dbNowUtcString(),
-                        ':sent_by_user_id' => $sentByUserId,
-                        ':sent_by_user_name' => $_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User',
+                    $routeIns->execute([
+                        ':document_id' => (int)$docId,
+                        ':from_user_id' => $sessionUserId > 0 ? $sessionUserId : null,
+                        ':to_user_id' => $officeHeadId !== null ? (int)$officeHeadId : null,
+                        ':to_office_id' => (int)$officeId,
+                        ':status' => 'pending_department',
+                        ':remarks' => $postedNotes,
+                        ':route_date' => dbNowUtcString(),
                     ]);
+
+                    if ($officeHeadId !== null) {
+                        $senderName = trim((string)($_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'Super Admin'));
+                        if ($senderName === '') $senderName = 'Super Admin';
+                        $message = $senderName . ' routed a document to your office';
+                        $notifIns->execute([
+                            ':user_id' => (int)$officeHeadId,
+                            ':document_id' => (int)$docId,
+                            ':notification_type' => 'document_route',
+                            ':message' => $message,
+                            ':link' => '../department%20heads%20Side/department_documents.php?highlight=' . (int)$docId,
+                            ':created_at' => dbNowUtcString(),
+                        ]);
+                    }
                     $sentCount++;
                 }
                 if ($sentCount > 0) {
                     if ($postedNotes !== '') {
-                        $noteUp = $pdo->prepare('UPDATE documents SET notes = :notes, updated_at = :updated_at WHERE id = :id');
-                        $noteUp->execute([':notes' => $postedNotes, ':updated_at' => dbNowUtcString(), ':id' => $docId]);
+                        $noteUp = $pdo->prepare('UPDATE documents SET notes = :notes, updated_at = :updated_at WHERE ' . $docIdCol . ' = :id');
+                        $noteUp->execute([':notes' => $postedNotes, ':updated_at' => dbNowUtcString(), ':id' => (int)$docId]);
                     }
                     activityLog($config, 'document_send_to_department_heads', [
                         'module' => 'super_admin_documents',
@@ -294,154 +471,127 @@ if (!empty($_GET['archive']) && preg_match('/^[a-f0-9]{24}$/i', $_GET['archive']
     exit;
 }
 
-// Add document (POST) – save to database
-$addError = null;
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'add_document') {
-    $documentCode = trim($_POST['document_code'] ?? '');
-    $documentTitle = trim($_POST['document_title'] ?? '');
-    if ($documentCode === '' || $documentTitle === '') {
-        $addError = 'Document code and title are required.';
-    } elseif (empty($_FILES['document_file']['tmp_name']) || !is_uploaded_file($_FILES['document_file']['tmp_name'])) {
-        $addError = 'Please select a DOCX file to upload.';
-    } else {
-        $file = $_FILES['document_file'];
-        $fname = $file['name'] ?? '';
-        if (!preg_match('/\.docx$/i', $fname)) {
-            $addError = 'Only .docx files are allowed.';
-        } else {
-            $fileContent = base64_encode(file_get_contents($file['tmp_name']));
-            if ($fileContent === false) {
-                $addError = 'Could not read the uploaded file.';
-            } else {
-                try {
-                    $pdo = dbPdo($config);
-                    $ins = $pdo->prepare(
-                        'INSERT INTO documents
-                            (id, document_code, document_title, file_name, file_content, created_at, created_by, status)
-                         VALUES
-                            (:id, :document_code, :document_title, :file_name, :file_content, :created_at, :created_by, :status)'
-                    );
-                    $ins->execute([
-                        ':id' => dbGenerateId24(),
-                        ':document_code' => $documentCode,
-                        ':document_title' => $documentTitle,
-                        ':file_name' => $fname,
-                        ':file_content' => $fileContent,
-                        ':created_at' => dbNowUtcString(),
-                        ':created_by' => $_SESSION['user_id'] ?? '',
-                        ':status' => 'active',
-                    ]);
-                    activityLog($config, 'document_add', [
-                        'module' => 'super_admin_documents',
-                        'document_code' => $documentCode,
-                        'document_title' => $documentTitle,
-                        'file_name' => (string)$fname,
-                    ]);
-                    header('Location: documents.php?added=1');
-                    exit;
-                } catch (Exception $e) {
-                    $addError = 'Failed to save document: ' . $e->getMessage();
-                }
-            }
-        }
-    }
-    if ($addError) {
-        $_SESSION['super_admin_doc_add_error'] = $addError;
-        header('Location: documents.php?add_error=1');
-        exit;
-    }
-}
-
-if (isset($_GET['add_error']) && isset($_SESSION['super_admin_doc_add_error'])) {
-    $addError = $_SESSION['super_admin_doc_add_error'];
-    unset($_SESSION['super_admin_doc_add_error']);
-}
+// Intake workflow: Super Admin can no longer upload/add documents directly.
 
 $sentList = [];
 $idsInList = [];
 $endorsementDepartments = [];
 try {
     $pdo = dbPdo($config);
-    // Load every sent record (one row per send – no deduplication by documentId)
-    // Deterministic ordering: when multiple sends share the same second,
-    // always keep the latest inserted row first.
-    $stmt = $pdo->query('SELECT * FROM sent_to_super_admin ORDER BY sent_at DESC, id DESC LIMIT 500');
-    foreach ($stmt as $arr) {
-        $arr['documentId'] = (string)($arr['document_id'] ?? '');
-        $arr['sentRecordId'] = (string)($arr['id'] ?? uniqid('sent-', true));
-        $arr['documentCode'] = $arr['document_code'] ?? '';
-        $arr['documentTitle'] = $arr['document_title'] ?? '';
-        $arr['fileName'] = $arr['file_name'] ?? 'document.docx';
-        $idsInList[$arr['documentId']] = true;
-        $dtTs = dbToTimestamp($arr['sent_at'] ?? null);
-        if ($dtTs !== null) {
-            $arr['sentAtFormatted'] = (new DateTime('@' . $dtTs))->setTimezone(new DateTimeZone('Asia/Manila'))->format('M j, Y g:i A');
-        } else {
-            $arr['sentAtFormatted'] = '—';
-        }
-        $sentList[] = $arr;
+    // Load sent records only if legacy table exists.
+    $hasSentTable = false;
+    try {
+        $tableCheck = $pdo->query("SHOW TABLES LIKE 'sent_to_super_admin'");
+        $hasSentTable = $tableCheck && $tableCheck->fetch();
+    } catch (Exception $e) {
+        $hasSentTable = false;
     }
-    // Add documents created by this Super Admin (saved via Add Document)
-    $currentUserId = $_SESSION['user_id'] ?? '';
-    if ($currentUserId !== '') {
-        $docStmt = $pdo->prepare(
-            'SELECT * FROM documents WHERE created_by = :created_by AND status <> :status ORDER BY created_at DESC LIMIT 500'
-        );
-        $docStmt->execute([':created_by' => $currentUserId, ':status' => 'archived']);
-        foreach ($docStmt as $d) {
-            $docId = (string)($d['id'] ?? '');
-            if ($docId === '' || isset($idsInList[$docId])) continue;
-            $idsInList[$docId] = true;
-            $sentList[] = [
-                'documentId'       => $docId,
-                'sentRecordId'     => $docId,
-                'documentCode'    => $d['document_code'] ?? '—',
-                'documentTitle'   => $d['document_title'] ?? '—',
-                'fileName'        => $d['file_name'] ?? 'document.docx',
-                'status'          => $d['status'] ?? 'active',
-                'sentAtFormatted' => '—',
-                'stamp_image' => '',
-                'stamp_width_pct' => 18,
-                'stamp_x_pct' => 82,
-                'stamp_y_pct' => 84,
-            ];
+    if ($hasSentTable) {
+        // Load every sent record (one row per send – no deduplication by documentId)
+        // Deterministic ordering: when multiple sends share the same second,
+        // always keep the latest inserted row first.
+        $stmt = $pdo->query('SELECT * FROM sent_to_super_admin ORDER BY sent_at DESC, id DESC LIMIT 500');
+        foreach ($stmt as $arr) {
+            $arr['documentId'] = (string)($arr['document_id'] ?? '');
+            $arr['sentRecordId'] = (string)($arr['id'] ?? uniqid('sent-', true));
+            $arr['documentCode'] = $arr['document_code'] ?? '';
+            $arr['documentTitle'] = $arr['document_title'] ?? '';
+            $arr['fileName'] = $arr['file_name'] ?? 'document.docx';
+            $idsInList[$arr['documentId']] = true;
+            $dtTs = dbToTimestamp($arr['sent_at'] ?? null);
+            if ($dtTs !== null) {
+                $arr['sentAtFormatted'] = (new DateTime('@' . $dtTs))->setTimezone(new DateTimeZone('Asia/Manila'))->format('M j, Y g:i A');
+            } else {
+                $arr['sentAtFormatted'] = '—';
+            }
+            $sentList[] = $arr;
         }
     }
-    $officeStmt = $pdo->query(
-        'SELECT o.id, o.office_name, o.office_code, o.office_head, o.office_head_id,
-                u.name AS head_name, u.username AS head_username, u.email AS head_email
-         FROM offices o
-         LEFT JOIN users u ON u.id = o.office_head_id
-         ORDER BY o.office_name ASC, o.office_code ASC'
-    );
-    foreach ($officeStmt as $o) {
-        $departmentLabel = trim((string)($o['office_name'] ?? ''));
-        if ($departmentLabel === '') {
-            $departmentLabel = trim((string)($o['office_code'] ?? ''));
-        }
-        if ($departmentLabel === '') {
-            continue;
-        }
+    // Add documents saved in the normalized documents table.
+    $docCols = documentTableColumns($pdo);
+    $hasStatus = isset($docCols['status']);
 
-        $headDisplay = trim((string)($o['head_name'] ?? ''));
-        if ($headDisplay === '') {
-            $headDisplay = trim((string)($o['head_username'] ?? ''));
-        }
-        if ($headDisplay === '') {
-            $headDisplay = trim((string)($o['head_email'] ?? ''));
-        }
-        if ($headDisplay === '') {
-            $headDisplay = trim((string)($o['office_head'] ?? ''));
-        }
+    $docSql = 'SELECT * FROM documents';
+    $docWhere = [];
+    $docParams = [];
+    // Do not restrict by created_by so migrated/legacy rows remain visible.
+    if ($hasStatus) {
+        $docWhere[] = 'LOWER(COALESCE(status, \'\')) <> :archived_status';
+        $docParams[':archived_status'] = 'archived';
+    }
+    if (!empty($docWhere)) {
+        $docSql .= ' WHERE ' . implode(' AND ', $docWhere);
+    }
+    if (isset($docCols['created_at'])) {
+        $docSql .= ' ORDER BY created_at DESC';
+    } elseif (isset($docCols['document_id'])) {
+        $docSql .= ' ORDER BY document_id DESC';
+    }
+    $docSql .= ' LIMIT 500';
 
-        $endorsementDepartments[] = [
-            'id' => (string)($o['id'] ?? ''),
-            'department' => $departmentLabel,
-            'head' => $headDisplay,
+    $docStmt = $pdo->prepare($docSql);
+    $docStmt->execute($docParams);
+    foreach ($docStmt as $d) {
+        $docId = (string)($d['document_id'] ?? ($d['id'] ?? ''));
+        if ($docId === '' || isset($idsInList[$docId])) continue;
+        $idsInList[$docId] = true;
+        $sentAtTs = dbToTimestamp($d['created_at'] ?? null);
+        $sentAtFormatted = $sentAtTs !== null
+            ? (new DateTime('@' . $sentAtTs))->setTimezone(new DateTimeZone('Asia/Manila'))->format('M j, Y g:i A')
+            : '—';
+        $sentList[] = [
+            'documentId'       => $docId,
+            'sentRecordId'     => $docId,
+            'documentCode'     => $d['tracking_code'] ?? ($d['document_code'] ?? '—'),
+            'documentTitle'    => $d['subject'] ?? ($d['document_title'] ?? '—'),
+            'fileName'         => $d['file_name'] ?? 'document.docx',
+            'status'           => $d['status'] ?? 'active',
+            'sentAtFormatted'  => $sentAtFormatted,
+            'stamp_image'      => '',
+            'stamp_width_pct'  => 18,
+            'stamp_x_pct'      => 82,
+            'stamp_y_pct'      => 84,
         ];
     }
+    try {
+        $officeStmt = $pdo->query(
+            "SELECT
+                o.office_id AS id,
+                o.office_name,
+                o.office_code,
+                COALESCE(NULLIF(u.name, ''), u.email) AS head_name
+             FROM offices o
+             LEFT JOIN users u
+                ON u.office_id = o.office_id
+               AND LOWER(TRIM(u.role)) IN ('departmenthead', 'department_head', 'dept_head')
+             ORDER BY o.office_name ASC, o.office_code ASC, u.user_id ASC"
+        );
+        foreach ($officeStmt as $o) {
+            $departmentLabel = trim((string)($o['office_name'] ?? ''));
+            if ($departmentLabel === '') {
+                $departmentLabel = trim((string)($o['office_code'] ?? ''));
+            }
+            if ($departmentLabel === '') {
+                continue;
+            }
+
+            $headDisplay = trim((string)($o['head_name'] ?? ''));
+
+            $endorsementDepartments[] = [
+                'id' => (string)($o['id'] ?? ''),
+                'department' => $departmentLabel,
+                'head' => $headDisplay,
+            ];
+        }
+    } catch (Exception $e) {
+        // Keep docs list available even if department-head lookup fails.
+        $endorsementDepartments = [];
+    }
 } catch (Exception $e) {
-    $sentList = [];
+    // Preserve already-built list when possible.
+    if (!is_array($sentList)) {
+        $sentList = [];
+    }
     $endorsementDepartments = [];
 }
 
@@ -450,12 +600,11 @@ $currentUserStamp = trim((string)($currentUserStampCfg['stamp'] ?? ''));
 $showSentToast = isset($_GET['sent']) && $_GET['sent'] === '1';
 $showSentHeadToast = isset($_GET['sent_head']) && $_GET['sent_head'] === '1';
 $showSentHeadCount = isset($_GET['count']) ? (int)$_GET['count'] : 0;
-$showAddedToast = isset($_GET['added']) && $_GET['added'] === '1';
 $showSendErrorToast = isset($_GET['send_error']) && $_GET['send_error'] === '1';
 $sendErrorDetail = isset($_GET['detail']) ? trim((string)$_GET['detail']) : '';
 
 $selectedDocumentId = trim((string)($_GET['doc'] ?? ''));
-$isViewMode = ($selectedDocumentId !== '' && preg_match('/^[a-f0-9]{24}$/i', $selectedDocumentId));
+$isViewMode = ($selectedDocumentId !== '' && preg_match('/^\d+$/', $selectedDocumentId));
 $highlightDocumentId = trim((string)($_GET['highlight'] ?? ''));
 
 $selectedDocument = null;
@@ -842,7 +991,7 @@ if ($isViewMode) {
         }
     </style>
 </head>
-<body<?php if (!empty($showSentToast)): ?> data-sent="1"<?php endif; ?><?php if (!empty($showSentHeadToast)): ?> data-sent-head="1" data-sent-head-count="<?= (int)$showSentHeadCount ?>"<?php endif; ?><?php if (!empty($showAddedToast)): ?> data-added="1"<?php endif; ?><?php if (!empty($addError)): ?> data-add-error="1"<?php endif; ?><?php if (!empty($showSendErrorToast)): ?> data-send-error="1"<?php endif; ?><?php if ($sendErrorDetail !== ''): ?> data-send-error-detail="<?= htmlspecialchars($sendErrorDetail) ?>"<?php endif; ?>>
+<body<?php if (!empty($showSentToast)): ?> data-sent="1"<?php endif; ?><?php if (!empty($showSentHeadToast)): ?> data-sent-head="1" data-sent-head-count="<?= (int)$showSentHeadCount ?>"<?php endif; ?><?php if (!empty($showSendErrorToast)): ?> data-send-error="1"<?php endif; ?><?php if ($sendErrorDetail !== ''): ?> data-send-error-detail="<?= htmlspecialchars($sendErrorDetail) ?>"<?php endif; ?>>
     <div class="dashboard-container">
         <?php include __DIR__ . '/_sidebar_super_admin.php'; ?>
 
@@ -868,10 +1017,6 @@ if ($isViewMode) {
                         <input type="text" placeholder="Search" aria-label="Search document">
                         <input type="date" aria-label="From date">
                         <input type="date" aria-label="To date">
-                        <button type="button" class="offices-btn" id="open-add-document-modal">
-                            <svg class="offices-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-                            Add Document
-                        </button>
                         <button type="button" class="offices-btn offices-btn-secondary" id="edit-document-btn">
                             <svg class="offices-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                             Edit
@@ -1062,36 +1207,6 @@ if ($isViewMode) {
                 </aside>
                 <?php endif; ?>
             </div>
-        </div>
-    </div>
-
-    <div class="doc-modal" id="add-document-modal" hidden>
-        <button type="button" class="doc-modal-overlay" data-close-add-document aria-label="Close"></button>
-        <div class="doc-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="add-document-title">
-            <div class="doc-modal-header">
-                <h2 id="add-document-title">Add Document</h2>
-                <button type="button" class="doc-modal-close" data-close-add-document aria-label="Close">&times;</button>
-            </div>
-            <form id="add-document-form" class="doc-modal-form" method="post" action="documents.php" enctype="multipart/form-data">
-                <input type="hidden" name="action" value="add_document">
-                <div class="doc-form-field">
-                    <label for="document-code">Document Code</label>
-                    <input type="text" id="document-code" name="document_code" placeholder="e.g. DOC-001" required>
-                </div>
-                <div class="doc-form-field">
-                    <label for="document-title">Document Title</label>
-                    <input type="text" id="document-title" name="document_title" placeholder="Enter document title" required>
-                </div>
-                <div class="doc-form-field">
-                    <label for="document-file">DOCX File</label>
-                    <input type="file" id="document-file" name="document_file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required>
-                </div>
-                <p class="doc-form-error" id="document-form-error" <?php if (empty($addError)): ?>hidden<?php endif; ?>><?php if (!empty($addError)): echo htmlspecialchars($addError); endif; ?></p>
-                <div class="doc-modal-actions">
-                    <button type="button" class="doc-btn doc-btn-cancel" data-close-add-document>Cancel</button>
-                    <button type="submit" class="doc-btn doc-btn-save">Save Document</button>
-                </div>
-            </form>
         </div>
     </div>
 
@@ -1335,52 +1450,8 @@ if ($isViewMode) {
     <script>
     (function() {
         var uploadedStampData = <?php echo json_encode($currentUserStamp); ?> || '';
-        var openAddModalBtn = document.getElementById('open-add-document-modal');
-        var addModal = document.getElementById('add-document-modal');
-        var addForm = document.getElementById('add-document-form');
-        var errorEl = document.getElementById('document-form-error');
         var documentsTableBody = document.getElementById('documents-table-body');
         var editBtn = document.getElementById('edit-document-btn');
-
-        function setFormError(message) {
-            if (!errorEl) return;
-            if (!message) {
-                errorEl.hidden = true;
-                errorEl.textContent = '';
-                return;
-            }
-            errorEl.hidden = false;
-            errorEl.textContent = message;
-        }
-
-        function openAddDocumentModal() {
-            if (!addModal) return;
-            addModal.hidden = false;
-            document.body.classList.add('modal-open');
-            setFormError('');
-        }
-
-        function closeAddDocumentModal() {
-            if (!addModal) return;
-            addModal.hidden = true;
-            document.body.classList.remove('modal-open');
-            setFormError('');
-            if (addForm) addForm.reset();
-        }
-
-        if (openAddModalBtn) {
-            openAddModalBtn.addEventListener('click', openAddDocumentModal);
-        }
-
-        document.querySelectorAll('[data-close-add-document]').forEach(function(closeBtn) {
-            closeBtn.addEventListener('click', closeAddDocumentModal);
-        });
-
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape' && addModal && !addModal.hidden) {
-                closeAddDocumentModal();
-            }
-        });
 
         if (editBtn) {
             editBtn.addEventListener('click', function() {
@@ -1406,14 +1477,6 @@ if ($isViewMode) {
             setTimeout(function() { sentHeadToast.remove(); }, 4200);
         }
 
-        if (document.body.getAttribute('data-added') === '1') {
-            var toast = document.createElement('div');
-            toast.setAttribute('role', 'status');
-            toast.textContent = 'Document saved successfully.';
-            toast.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:1600;padding:0.75rem 1.25rem;background:#22c55e;color:#fff;border-radius:10px;font-size:14px;font-weight:500;box-shadow:0 4px 14px rgba(0,0,0,0.15);';
-            document.body.appendChild(toast);
-            setTimeout(function() { toast.remove(); }, 4000);
-        }
         if (document.body.getAttribute('data-send-error') === '1') {
             var errDetail = document.body.getAttribute('data-send-error-detail') || '';
             var errMsg = 'Could not send document.';
@@ -1424,11 +1487,6 @@ if ($isViewMode) {
             errToast.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:1600;padding:0.75rem 1.25rem;background:#ef4444;color:#fff;border-radius:10px;font-size:14px;font-weight:500;box-shadow:0 4px 14px rgba(0,0,0,0.15);max-width:480px;';
             document.body.appendChild(errToast);
             setTimeout(function() { errToast.remove(); }, 6000);
-        }
-
-        if (addModal && document.body.getAttribute('data-add-error') === '1') {
-            addModal.hidden = false;
-            document.body.classList.add('modal-open');
         }
 
         var highlightId = (function() {

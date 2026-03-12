@@ -2,11 +2,10 @@
 /**
  * Super Admin sidebar – include in Super Admin pages (e.g. offices-department.php).
  * Expects in scope: $sidebar_active, $userName, $userRole, $userInitial (and $_SESSION['user_photo']).
- * Username is always read from DB so profile stays in sync when username is updated in database.
+ * Sidebar identity label uses the user's display name.
  */
-$userUsername = (function_exists('getUserUsername') ? getUserUsername($_SESSION['user_id'] ?? '') : '') ?: ($_SESSION['user_username'] ?? '');
-if ($userUsername !== '') $_SESSION['user_username'] = $userUsername;
-if ($userUsername === '') $userUsername = 'User';
+$sidebarDisplayName = trim((string)($_SESSION['user_name'] ?? $userName ?? $_SESSION['user_email'] ?? 'User'));
+if ($sidebarDisplayName === '') $sidebarDisplayName = 'User';
 ?>
 <div class="sidebar">
     <div class="sidebar-header">
@@ -40,7 +39,7 @@ if ($userUsername === '') $userUsername = 'User';
         <div class="sidebar-user" id="sidebar-account-btn" role="button" tabindex="0" aria-label="Account menu" aria-haspopup="true" aria-expanded="false">
             <div class="sidebar-user-avatar profile-photo-view-trigger" role="button" tabindex="0" title="Click to view"><?php if (!empty($_SESSION['user_photo'])): ?><img src="<?php echo htmlspecialchars($_SESSION['user_photo']); ?>" alt=""><?php else: ?><?php echo htmlspecialchars($userInitial); ?><?php endif; ?></div>
             <div class="sidebar-user-info">
-                <p class="sidebar-user-name"><?php echo htmlspecialchars($userUsername); ?></p>
+                <p class="sidebar-user-name"><?php echo htmlspecialchars($sidebarDisplayName); ?></p>
                 <p class="sidebar-user-role"><?php echo htmlspecialchars($userRole); ?></p>
             </div>
         </div>

@@ -19,7 +19,7 @@ $welcomeUsername = getUserUsername($_SESSION['user_id'] ?? '') ?: ($_SESSION['us
 $user = null;
 try {
     $pdo = dbPdo($config);
-    $stmt = $pdo->prepare('SELECT * FROM users WHERE id = :id LIMIT 1');
+    $stmt = $pdo->prepare('SELECT * FROM users WHERE user_id = :id LIMIT 1');
     $stmt->execute([':id' => $userId]);
     $user = $stmt->fetch() ?: null;
 } catch (Exception $e) {
@@ -65,7 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
 
     try {
         $pdo = dbPdo($config);
-        $check = $pdo->prepare('SELECT id FROM users WHERE (username = :username OR email = :email) AND id <> :id LIMIT 1');
+        $check = $pdo->prepare('SELECT user_id FROM users WHERE (username = :username OR email = :email) AND user_id <> :id LIMIT 1');
         $check->execute([
             ':username' => $username,
             ':email' => $email,
@@ -81,7 +81,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
                 'UPDATE users
                  SET username = :username, name = :name, email = :email, role = :role,
                      password = :password, updated_at = :updated_at
-                 WHERE id = :id'
+                 WHERE user_id = :id'
             );
             $ok = $stmt->execute([
                 ':username' => $username,
@@ -96,7 +96,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
             $stmt = $pdo->prepare(
                 'UPDATE users
                  SET username = :username, name = :name, email = :email, role = :role, updated_at = :updated_at
-                 WHERE id = :id'
+                 WHERE user_id = :id'
             );
             $ok = $stmt->execute([
                 ':username' => $username,

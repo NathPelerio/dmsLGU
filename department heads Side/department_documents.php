@@ -29,10 +29,55 @@ require_once __DIR__ . '/../db.php';
 require_once __DIR__ . '/../Super Admin Side/_account_helpers.php';
 require_once __DIR__ . '/_notifications_department_head.php';
 
+function resolveDepartmentSessionUserId($pdo) {
+    $rawId = trim((string)($_SESSION['user_id'] ?? ''));
+    if ($rawId !== '' && ctype_digit($rawId)) {
+        return (int)$rawId;
+    }
+    $email = trim((string)($_SESSION['user_email'] ?? ''));
+    $username = trim((string)($_SESSION['user_username'] ?? ''));
+    $name = trim((string)($_SESSION['user_name'] ?? ''));
+    $userCols = departmentUserTableColumns($pdo);
+    $lookupPlan = [];
+    if ($email !== '' && isset($userCols['email'])) {
+        $lookupPlan[] = ['sql' => 'SELECT user_id FROM users WHERE LOWER(email) = LOWER(:value) LIMIT 1', 'value' => $email];
+    }
+    if ($username !== '' && isset($userCols['username'])) {
+        $lookupPlan[] = ['sql' => 'SELECT user_id FROM users WHERE LOWER(username) = LOWER(:value) LIMIT 1', 'value' => $username];
+    }
+    if ($name !== '' && isset($userCols['name'])) {
+        $lookupPlan[] = ['sql' => 'SELECT user_id FROM users WHERE LOWER(name) = LOWER(:value) LIMIT 1', 'value' => $name];
+    }
+    foreach ($lookupPlan as $lookup) {
+        try {
+            $stmt = $pdo->prepare((string)$lookup['sql']);
+            $stmt->execute([':value' => (string)$lookup['value']]);
+            $row = $stmt->fetch();
+            if ($row && !empty($row['user_id'])) {
+                $_SESSION['user_id'] = (string)$row['user_id'];
+                return (int)$row['user_id'];
+            }
+        } catch (Exception $e) {
+            // Try next lookup.
+        }
+    }
+    return 0;
+}
+
 $currentUserId = (string)($_SESSION['user_id'] ?? '');
 $currentUserName = (string)($_SESSION['user_name'] ?? $_SESSION['user_email'] ?? '');
 $currentUserEmail = (string)($_SESSION['user_email'] ?? '');
 $currentUserDepartment = trim((string)($_SESSION['user_department'] ?? ''));
+$resolvedUserId = 0;
+try {
+    $pdoSession = dbPdo($config);
+    $resolvedUserId = resolveDepartmentSessionUserId($pdoSession);
+} catch (Exception $e) {
+    $resolvedUserId = 0;
+}
+if ($resolvedUserId > 0) {
+    $currentUserId = (string)$resolvedUserId;
+}
 $currentUserUsername = trim((string)(getUserUsername($currentUserId) ?: ($_SESSION['user_username'] ?? '')));
 
 $headNameCandidates = [];
@@ -57,56 +102,221 @@ function docMimeFromName($name) {
     return 'application/octet-stream';
 }
 
+function departmentDocumentTableColumns($pdo) {
+    static $cols = null;
+    if (is_array($cols)) {
+        return $cols;
+    }
+    $cols = [];
+    try {
+        $stmt = $pdo->query('SHOW COLUMNS FROM documents');
+        foreach ($stmt as $row) {
+            $field = strtolower((string)($row['Field'] ?? ''));
+            if ($field !== '') {
+                $cols[$field] = true;
+            }
+        }
+    } catch (Exception $e) {
+        $cols = [];
+    }
+    return $cols;
+}
+
+function departmentUserTableColumns($pdo) {
+    static $cols = null;
+    if (is_array($cols)) {
+        return $cols;
+    }
+    $cols = [];
+    try {
+        $stmt = $pdo->query('SHOW COLUMNS FROM users');
+        foreach ($stmt as $row) {
+            $field = strtolower((string)($row['Field'] ?? ''));
+            if ($field !== '') {
+                $cols[$field] = true;
+            }
+        }
+    } catch (Exception $e) {
+        $cols = [];
+    }
+    return $cols;
+}
+
+function departmentUserDisplayExpr($alias, array $userCols, $fallback = 'User') {
+    $parts = [];
+    if (isset($userCols['username'])) {
+        $parts[] = 'NULLIF(' . $alias . '.username, \'\')';
+    }
+    if (isset($userCols['name'])) {
+        $parts[] = 'NULLIF(' . $alias . '.name, \'\')';
+    }
+    if (isset($userCols['email'])) {
+        $parts[] = $alias . '.email';
+    }
+    $safeFallback = str_replace("'", "\\'", (string)$fallback);
+    if (empty($parts)) {
+        return "'" . $safeFallback . "'";
+    }
+    return 'COALESCE(' . implode(', ', $parts) . ", '" . $safeFallback . "')";
+}
+
+function getDepartmentHeadContext($pdo, $userId, $sessionDepartment = '') {
+    $ctx = [
+        'office_id' => 0,
+        'office_name' => trim((string)$sessionDepartment),
+    ];
+    if ((int)$userId <= 0) {
+        if ($ctx['office_name'] !== '') {
+            try {
+                $officeStmt = $pdo->prepare('SELECT office_id FROM offices WHERE LOWER(TRIM(office_name)) = LOWER(TRIM(:name)) LIMIT 1');
+                $officeStmt->execute([':name' => $ctx['office_name']]);
+                $officeRow = $officeStmt->fetch();
+                if ($officeRow && !empty($officeRow['office_id'])) {
+                    $ctx['office_id'] = (int)$officeRow['office_id'];
+                }
+            } catch (Exception $e) {
+                // Keep defaults.
+            }
+        }
+        return $ctx;
+    }
+    try {
+        $stmt = $pdo->prepare(
+            'SELECT u.office_id, o.office_name
+             FROM users u
+             LEFT JOIN offices o ON o.office_id = u.office_id
+             WHERE u.user_id = :user_id
+             LIMIT 1'
+        );
+        $stmt->execute([':user_id' => (int)$userId]);
+        $row = $stmt->fetch();
+        if ($row) {
+            $ctx['office_id'] = (int)($row['office_id'] ?? 0);
+            $officeName = trim((string)($row['office_name'] ?? ''));
+            if ($officeName !== '') {
+                $ctx['office_name'] = $officeName;
+            }
+        }
+    } catch (Exception $e) {
+        // Keep fallback session values.
+    }
+    return $ctx;
+}
+
+function getDepartmentDocumentFilePayload($pdo, $documentId) {
+    $cols = departmentDocumentTableColumns($pdo);
+    if (empty($cols)) {
+        return null;
+    }
+    $idCol = isset($cols['document_id']) ? 'document_id' : 'id';
+    $selectCols = [];
+    foreach (['file_name', 'mime_type', 'storage_path', 'file_content'] as $col) {
+        if (isset($cols[$col])) {
+            $selectCols[] = $col;
+        }
+    }
+    if (empty($selectCols)) {
+        return null;
+    }
+    $sql = 'SELECT ' . implode(', ', $selectCols) . ' FROM documents WHERE ' . $idCol . ' = :id LIMIT 1';
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([':id' => (int)$documentId]);
+    $row = $stmt->fetch();
+    if (!$row) {
+        return null;
+    }
+    return [
+        'file_name' => (string)($row['file_name'] ?? 'document.bin'),
+        'mime_type' => (string)($row['mime_type'] ?? ''),
+        'storage_path' => (string)($row['storage_path'] ?? ''),
+        'file_content' => (string)($row['file_content'] ?? ''),
+    ];
+}
+
 // Serve file content only if this department head received the document.
 if (
-    (!empty($_GET['view']) && preg_match('/^[a-f0-9]{24}$/i', (string)$_GET['view'])) ||
-    (!empty($_GET['download']) && preg_match('/^[a-f0-9]{24}$/i', (string)$_GET['download']))
+    (!empty($_GET['view']) && preg_match('/^\d+$/', (string)$_GET['view'])) ||
+    (!empty($_GET['download']) && preg_match('/^\d+$/', (string)$_GET['download']))
 ) {
     $docId = !empty($_GET['view']) ? (string)$_GET['view'] : (string)$_GET['download'];
     $isDownload = !empty($_GET['download']);
     try {
         $pdo = dbPdo($config);
-        $stmt = $pdo->prepare(
-            'SELECT d.file_name, d.file_content
-             FROM sent_to_department_heads sth
-             INNER JOIN documents d ON d.id = sth.document_id
-             WHERE sth.document_id = :document_id
+        $ctx = getDepartmentHeadContext($pdo, $currentUserId, $currentUserDepartment);
+        $accessStmt = $pdo->prepare(
+            'SELECT 1
+             FROM document_routes dr
+             LEFT JOIN offices o ON o.office_id = dr.to_office_id
+             WHERE dr.document_id = :document_id
                AND (
-                    sth.office_head_id = :user_id
-                    OR (
-                        sth.office_head_id IS NULL
-                        AND (
-                            LOWER(TRIM(sth.office_head_name)) IN (:head_name_1, :head_name_2, :head_name_3)
-                            OR (:user_department_check <> \'\' AND LOWER(TRIM(sth.office_name)) = LOWER(TRIM(:user_department_value)))
-                        )
+                    dr.to_user_id = :route_user_id
+                    OR (:route_office_id > 0 AND dr.to_office_id = :route_office_id_match)
+                    OR (:route_office_name <> \'\' AND LOWER(TRIM(o.office_name)) = LOWER(TRIM(:route_office_name_match)))
+                    OR EXISTS (
+                        SELECT 1
+                        FROM notifications n
+                        WHERE n.document_id = dr.document_id
+                          AND n.user_id = :notif_user_id
                     )
+                    OR (:ctx_unresolved = 1 AND dr.to_user_id IS NULL AND dr.to_office_id IS NOT NULL)
                )
-             ORDER BY sth.sent_at DESC
              LIMIT 1'
         );
-        $stmt->execute([
-            ':document_id' => $docId,
-            ':user_id' => $currentUserId,
-            ':head_name_1' => $headName1,
-            ':head_name_2' => $headName2,
-            ':head_name_3' => $headName3,
-            ':user_department_check' => $currentUserDepartment,
-            ':user_department_value' => $currentUserDepartment,
+        $accessStmt->execute([
+            ':document_id' => (int)$docId,
+            ':route_user_id' => (int)$currentUserId,
+            ':route_office_id' => (int)($ctx['office_id'] ?? 0),
+            ':route_office_id_match' => (int)($ctx['office_id'] ?? 0),
+            ':route_office_name' => (string)($ctx['office_name'] ?? ''),
+            ':route_office_name_match' => (string)($ctx['office_name'] ?? ''),
+            ':notif_user_id' => (int)$currentUserId,
+            ':ctx_unresolved' => ((int)($ctx['office_id'] ?? 0) <= 0 && trim((string)($ctx['office_name'] ?? '')) === '') ? 1 : 0,
         ]);
-        $doc = $stmt->fetch();
-        if ($doc) {
-            $fileName = (string)($doc['file_name'] ?? 'document.bin');
-            $fileContent = (string)($doc['file_content'] ?? '');
-            if ($fileContent !== '') {
-                if (ob_get_level()) ob_end_clean();
-                header('Content-Type: ' . docMimeFromName($fileName));
-                header(
-                    'Content-Disposition: ' . ($isDownload ? 'attachment' : 'inline') .
-                    '; filename="' . preg_replace('/[^a-zA-Z0-9._-]/', '_', $fileName) . '"'
-                );
-                $decoded = base64_decode($fileContent, true);
-                echo ($decoded !== false) ? $decoded : $fileContent;
-                exit;
+        $hasRouteAccess = (bool)$accessStmt->fetch();
+        $hasNotificationAccess = false;
+        if (!$hasRouteAccess) {
+            $notifAccessStmt = $pdo->prepare(
+                'SELECT 1
+                 FROM notifications n
+                 WHERE n.document_id = :document_id
+                   AND n.user_id = :user_id
+                 LIMIT 1'
+            );
+            $notifAccessStmt->execute([
+                ':document_id' => (int)$docId,
+                ':user_id' => (int)$currentUserId,
+            ]);
+            $hasNotificationAccess = (bool)$notifAccessStmt->fetch();
+        }
+        if ($hasRouteAccess || $hasNotificationAccess) {
+            $doc = getDepartmentDocumentFilePayload($pdo, $docId);
+            if ($doc) {
+                $fileName = (string)($doc['file_name'] ?? 'document.bin');
+                $mimeType = trim((string)($doc['mime_type'] ?? ''));
+                if ($mimeType === '') {
+                    $mimeType = docMimeFromName($fileName);
+                }
+                $safeName = preg_replace('/[^a-zA-Z0-9._-]/', '_', $fileName);
+                $storagePath = trim((string)($doc['storage_path'] ?? ''));
+                if ($storagePath !== '') {
+                    $absPath = dirname(__DIR__) . '/' . ltrim(str_replace('\\', '/', $storagePath), '/');
+                    if (is_file($absPath) && is_readable($absPath)) {
+                        if (ob_get_level()) ob_end_clean();
+                        header('Content-Type: ' . $mimeType);
+                        header('Content-Disposition: ' . ($isDownload ? 'attachment' : 'inline') . '; filename="' . $safeName . '"');
+                        readfile($absPath);
+                        exit;
+                    }
+                }
+                $fileContent = (string)($doc['file_content'] ?? '');
+                if ($fileContent !== '') {
+                    if (ob_get_level()) ob_end_clean();
+                    header('Content-Type: ' . $mimeType);
+                    header('Content-Disposition: ' . ($isDownload ? 'attachment' : 'inline') . '; filename="' . $safeName . '"');
+                    $decoded = base64_decode($fileContent, true);
+                    echo ($decoded !== false) ? $decoded : $fileContent;
+                    exit;
+                }
             }
         }
     } catch (Exception $e) {
@@ -130,47 +340,118 @@ $sidebar_active = 'documents';
 $documentsList = [];
 try {
     $pdo = dbPdo($config);
+    $ctx = getDepartmentHeadContext($pdo, $currentUserId, $currentUserDepartment);
+    $docCols = departmentDocumentTableColumns($pdo);
+    $userCols = departmentUserTableColumns($pdo);
+    $docIdCol = isset($docCols['document_id']) ? 'document_id' : 'id';
+    $docCodeExpr = isset($docCols['tracking_code']) ? 'd.tracking_code' : (isset($docCols['document_code']) ? 'd.document_code' : "''");
+    $docTitleExpr = isset($docCols['subject']) ? 'd.subject' : (isset($docCols['document_title']) ? 'd.document_title' : "''");
+    $docStatusExpr = isset($docCols['status']) ? 'd.status' : "'pending_department'";
+    $docNotesExpr = isset($docCols['notes']) ? 'd.notes' : 'dr.remarks';
+    $docFileExpr = isset($docCols['file_name']) ? 'd.file_name' : "''";
+    $sentByExpr = departmentUserDisplayExpr('u', $userCols, 'User');
+
     $stmt = $pdo->prepare(
         'SELECT
-            sth.document_id,
-            sth.sent_by_user_name,
-            sth.sent_at,
-            sth.office_name,
-            d.document_code,
-            d.document_title,
-            d.file_name,
-            d.status,
-            d.notes
-         FROM sent_to_department_heads sth
-         INNER JOIN documents d ON d.id = sth.document_id
+            dr.document_id,
+            ' . $sentByExpr . ' AS sent_by_user_name,
+            dr.route_date AS sent_at,
+            o.office_name,
+            ' . $docCodeExpr . ' AS document_code,
+            ' . $docTitleExpr . ' AS document_title,
+            ' . $docFileExpr . ' AS file_name,
+            ' . $docStatusExpr . ' AS status,
+            ' . $docNotesExpr . ' AS notes
+         FROM document_routes dr
+         INNER JOIN documents d ON d.' . $docIdCol . ' = dr.document_id
+         LEFT JOIN users u ON u.user_id = dr.from_user_id
+         LEFT JOIN offices o ON o.office_id = dr.to_office_id
          WHERE
-            sth.office_head_id = :user_id
-            OR (
-                sth.office_head_id IS NULL
-                AND (
-                    LOWER(TRIM(sth.office_head_name)) IN (:head_name_1, :head_name_2, :head_name_3)
-                    OR (:user_department_check <> \'\' AND LOWER(TRIM(sth.office_name)) = LOWER(TRIM(:user_department_value)))
-                )
+            dr.to_user_id = :route_user_id
+            OR (:route_office_id > 0 AND dr.to_office_id = :route_office_id_match)
+            OR (:route_office_name <> \'\' AND LOWER(TRIM(o.office_name)) = LOWER(TRIM(:route_office_name_match)))
+            OR EXISTS (
+                SELECT 1
+                FROM notifications n
+                WHERE n.document_id = dr.document_id
+                  AND n.user_id = :notif_user_id
             )
-         ORDER BY sth.sent_at DESC
+            OR (:ctx_unresolved = 1 AND dr.to_user_id IS NULL AND dr.to_office_id IS NOT NULL)
+         ORDER BY dr.route_date DESC, dr.route_id DESC
          LIMIT 250'
     );
     $stmt->execute([
-        ':user_id' => $currentUserId,
-        ':head_name_1' => $headName1,
-        ':head_name_2' => $headName2,
-        ':head_name_3' => $headName3,
-        ':user_department_check' => $currentUserDepartment,
-        ':user_department_value' => $currentUserDepartment,
+        ':route_user_id' => (int)$currentUserId,
+        ':route_office_id' => (int)($ctx['office_id'] ?? 0),
+        ':route_office_id_match' => (int)($ctx['office_id'] ?? 0),
+        ':route_office_name' => (string)($ctx['office_name'] ?? ''),
+        ':route_office_name_match' => (string)($ctx['office_name'] ?? ''),
+        ':notif_user_id' => (int)$currentUserId,
+        ':ctx_unresolved' => ((int)($ctx['office_id'] ?? 0) <= 0 && trim((string)($ctx['office_name'] ?? '')) === '') ? 1 : 0,
     ]);
     $documentsList = $stmt->fetchAll() ?: [];
+
+    // Fallback: include docs that were notified to this user even when route matching fails.
+    $existingDocIds = [];
+    foreach ($documentsList as $row) {
+        $id = trim((string)($row['document_id'] ?? ''));
+        if ($id !== '') {
+            $existingDocIds[$id] = true;
+        }
+    }
+    $docCreatedExpr = isset($docCols['created_at']) ? 'd.created_at' : "''";
+    $notifStmt = $pdo->prepare(
+        'SELECT
+            n.document_id,
+            ' . $sentByExpr . ' AS sent_by_user_name,
+            COALESCE(n.created_at, ' . $docCreatedExpr . ') AS sent_at,
+            o.office_name,
+            ' . $docCodeExpr . ' AS document_code,
+            ' . $docTitleExpr . ' AS document_title,
+            ' . $docFileExpr . ' AS file_name,
+            ' . $docStatusExpr . ' AS status,
+            ' . $docNotesExpr . ' AS notes
+         FROM notifications n
+         INNER JOIN documents d ON d.' . $docIdCol . ' = n.document_id
+         LEFT JOIN document_routes dr ON dr.route_id = (
+             SELECT dr2.route_id
+             FROM document_routes dr2
+             WHERE dr2.document_id = n.document_id
+             ORDER BY dr2.route_date DESC, dr2.route_id DESC
+             LIMIT 1
+         )
+         LEFT JOIN users u ON u.user_id = dr.from_user_id
+         LEFT JOIN offices o ON o.office_id = dr.to_office_id
+         WHERE n.user_id = :user_id
+         ORDER BY n.created_at DESC, n.notification_id DESC
+         LIMIT 250'
+    );
+    $notifStmt->execute([':user_id' => (int)$currentUserId]);
+    $notifiedRows = $notifStmt->fetchAll() ?: [];
+    foreach ($notifiedRows as $row) {
+        $id = trim((string)($row['document_id'] ?? ''));
+        if ($id === '' || isset($existingDocIds[$id])) {
+            continue;
+        }
+        $documentsList[] = $row;
+        $existingDocIds[$id] = true;
+    }
+
+    usort($documentsList, static function ($a, $b) {
+        $timeA = strtotime((string)($a['sent_at'] ?? '')) ?: 0;
+        $timeB = strtotime((string)($b['sent_at'] ?? '')) ?: 0;
+        if ($timeA === $timeB) {
+            return ((int)($b['document_id'] ?? 0)) <=> ((int)($a['document_id'] ?? 0));
+        }
+        return $timeB <=> $timeA;
+    });
 } catch (Exception $e) {
     error_log('[department_documents list] ' . $e->getMessage());
     $documentsList = [];
 }
 
 $selectedDocumentId = trim((string)($_GET['doc'] ?? ''));
-$isViewMode = ($selectedDocumentId !== '');
+$isViewMode = ($selectedDocumentId !== '' && preg_match('/^\d+$/', $selectedDocumentId));
 $highlightDocumentId = trim((string)($_GET['highlight'] ?? ''));
 
 $selectedDocument = null;
@@ -192,48 +473,37 @@ $superAdminNote = trim((string)($selectedDocument['notes'] ?? ''));
 
 $progressEvents = [];
 $currentHolderLabel = 'No holder yet';
-if ($isViewMode && preg_match('/^[a-f0-9]{24}$/i', $selectedDocumentId)) {
+if ($isViewMode && preg_match('/^\d+$/', $selectedDocumentId)) {
     try {
         $pdo = dbPdo($config);
-
-        // Mark routed entries as read once the department head opens the document.
-        $markReadStmt = $pdo->prepare(
-            'UPDATE sent_to_department_heads sth
-             SET sth.read_at = COALESCE(sth.read_at, :read_at)
-             WHERE sth.document_id = :document_id
-               AND (
-                    sth.office_head_id = :user_id
-                    OR (
-                        sth.office_head_id IS NULL
-                        AND (
-                            LOWER(TRIM(sth.office_head_name)) IN (:head_name_1, :head_name_2, :head_name_3)
-                            OR (:user_department_check <> \'\' AND LOWER(TRIM(sth.office_name)) = LOWER(TRIM(:user_department_value)))
-                        )
-                    )
-               )'
+        $ctx = getDepartmentHeadContext($pdo, $currentUserId, $currentUserDepartment);
+        $userCols = departmentUserTableColumns($pdo);
+        $routeSenderExpr = departmentUserDisplayExpr('u', $userCols, 'User');
+        $actorExpr = departmentUserDisplayExpr('u', $userCols, '');
+        $markNotifStmt = $pdo->prepare(
+            'UPDATE notifications
+             SET is_read = 1
+             WHERE user_id = :user_id
+               AND document_id = :document_id
+               AND is_read = 0'
         );
-        $markReadStmt->execute([
-            ':read_at' => dbNowUtcString(),
-            ':document_id' => $selectedDocumentId,
-            ':user_id' => $currentUserId,
-            ':head_name_1' => $headName1,
-            ':head_name_2' => $headName2,
-            ':head_name_3' => $headName3,
-            ':user_department_check' => $currentUserDepartment,
-            ':user_department_value' => $currentUserDepartment,
+        $markNotifStmt->execute([
+            ':user_id' => (int)$currentUserId,
+            ':document_id' => (int)$selectedDocumentId,
         ]);
 
         $routeStmt = $pdo->prepare(
             'SELECT
-                sth.office_name,
-                sth.sent_by_user_name,
-                sth.sent_at,
-                sth.read_at
-             FROM sent_to_department_heads sth
-             WHERE sth.document_id = :document_id
-             ORDER BY sth.sent_at ASC, sth.id ASC'
+                COALESCE(o.office_name, \'Unknown Department\') AS office_name,
+                ' . $routeSenderExpr . ' AS sent_by_user_name,
+                dr.route_date AS sent_at
+             FROM document_routes dr
+             LEFT JOIN offices o ON o.office_id = dr.to_office_id
+             LEFT JOIN users u ON u.user_id = dr.from_user_id
+             WHERE dr.document_id = :document_id
+             ORDER BY dr.route_date ASC, dr.route_id ASC'
         );
-        $routeStmt->execute([':document_id' => $selectedDocumentId]);
+        $routeStmt->execute([':document_id' => (int)$selectedDocumentId]);
         $routeRows = $routeStmt->fetchAll() ?: [];
         foreach ($routeRows as $row) {
             $deptName = trim((string)($row['office_name'] ?? 'Unknown Department'));
@@ -241,36 +511,43 @@ if ($isViewMode && preg_match('/^[a-f0-9]{24}$/i', $selectedDocumentId)) {
                 'department' => ($deptName !== '' ? $deptName : 'Unknown Department'),
                 'action' => 'routed',
                 'received_at' => (string)($row['sent_at'] ?? ''),
-                'processed_at' => (string)($row['read_at'] ?? ''),
+                'processed_at' => '',
                 'notes' => 'Sent by ' . trim((string)($row['sent_by_user_name'] ?? 'User')),
             ];
         }
 
-        // If custom progress table exists, include manual/explicit department progress logs.
-        $hasProgressTable = false;
-        $tableCheck = $pdo->query("SHOW TABLES LIKE 'document_progress'");
-        if ($tableCheck && $tableCheck->fetch()) {
-            $hasProgressTable = true;
-        }
-        if ($hasProgressTable) {
-            $dpStmt = $pdo->prepare(
-                'SELECT department, action, received_at, processed_at, notes
-                 FROM document_progress
-                 WHERE document_id = :document_id
-                 ORDER BY received_at ASC, id ASC'
-            );
-            $dpStmt->execute([':document_id' => $selectedDocumentId]);
-            $dpRows = $dpStmt->fetchAll() ?: [];
-            foreach ($dpRows as $row) {
-                $deptName = trim((string)($row['department'] ?? 'Unknown Department'));
-                $progressEvents[] = [
-                    'department' => ($deptName !== '' ? $deptName : 'Unknown Department'),
-                    'action' => trim((string)($row['action'] ?? 'received')),
-                    'received_at' => (string)($row['received_at'] ?? ''),
-                    'processed_at' => (string)($row['processed_at'] ?? ''),
-                    'notes' => trim((string)($row['notes'] ?? '')),
-                ];
+        $actionStmt = $pdo->prepare(
+            'SELECT
+                da.action_type,
+                da.action_date,
+                ' . $actorExpr . ' AS actor_name,
+                COALESCE(o.office_name, \'\') AS office_name,
+                da.remarks
+             FROM document_actions da
+             LEFT JOIN users u ON u.user_id = da.performed_by
+             LEFT JOIN offices o ON o.office_id = da.office_id
+             WHERE da.document_id = :document_id
+             ORDER BY da.action_date ASC, da.action_id ASC'
+        );
+        $actionStmt->execute([':document_id' => (int)$selectedDocumentId]);
+        $actionRows = $actionStmt->fetchAll() ?: [];
+        foreach ($actionRows as $row) {
+            $deptName = trim((string)($row['office_name'] ?? ''));
+            if ($deptName === '') {
+                $deptName = (string)($ctx['office_name'] ?? 'Department');
             }
+            $actor = trim((string)($row['actor_name'] ?? ''));
+            $note = trim((string)($row['remarks'] ?? ''));
+            if ($note === '' && $actor !== '') {
+                $note = 'By ' . $actor;
+            }
+            $progressEvents[] = [
+                'department' => $deptName !== '' ? $deptName : 'Department',
+                'action' => trim((string)($row['action_type'] ?? 'updated')),
+                'received_at' => (string)($row['action_date'] ?? ''),
+                'processed_at' => (string)($row['action_date'] ?? ''),
+                'notes' => $note,
+            ];
         }
 
         usort($progressEvents, static function ($a, $b) {
