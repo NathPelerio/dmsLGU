@@ -247,10 +247,22 @@ try {
         }
         .status-breakdown-card {
             border: 1px solid #e2e8f0 !important;
-            box-shadow: none !important;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06) !important;
             background: #ffffff !important;
             border-radius: 14px;
             padding: 18px 20px !important;
+        }
+        .my-tasks-card,
+        .status-breakdown-card {
+            transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+        }
+        @media (hover: hover) and (pointer: fine) {
+            .my-tasks-card:hover,
+            .status-breakdown-card:hover {
+                transform: translateY(-3px);
+                box-shadow: 0 12px 24px rgba(15, 23, 42, 0.1) !important;
+                border-color: #d6deeb !important;
+            }
         }
         .status-breakdown-card .card-title { margin-bottom: 12px; }
         .status-chart-wrap {

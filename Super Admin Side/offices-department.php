@@ -770,6 +770,87 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .dept-view-modal-content .view-value .flow-clickable { color: #2563eb; text-decoration: underline; background: none; border: none; padding: 0; font: inherit; cursor: pointer; }
         .dept-view-modal-content .view-value .flow-clickable:hover { color: #1d4ed8; }
         .dept-view-modal-content .view-value.desc { white-space: pre-wrap; }
+        /* Department details as right-side off-canvas */
+        #modal-view.offices-modal {
+            align-items: stretch;
+            justify-content: flex-end;
+            padding: 0;
+            overflow: hidden;
+        }
+        #modal-view .offices-modal-overlay { background: rgba(15, 23, 42, 0.45); }
+        #modal-view .dept-view-modal-content {
+            width: min(100%, 560px);
+            max-width: 560px;
+            height: 100%;
+            max-height: 100%;
+            margin-left: auto;
+            border-radius: 0;
+            padding: 1.5rem 1.35rem 1.15rem;
+            overflow-y: auto;
+            transform: translateX(100%);
+            transition: transform 0.24s ease;
+            box-shadow: -18px 0 36px rgba(15, 23, 42, 0.18);
+        }
+        #modal-view.offcanvas-open .dept-view-modal-content { transform: translateX(0); }
+        #modal-view .offcanvas-header {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.55rem;
+        }
+        #modal-view .offcanvas-header-icon {
+            width: 30px;
+            height: 30px;
+            border-radius: 8px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: #dbeafe;
+            color: #1d4ed8;
+            flex-shrink: 0;
+        }
+        #modal-view .offcanvas-header-icon svg { width: 16px; height: 16px; }
+        #modal-view .dept-view-modal-content h3 {
+            margin-bottom: 0.2rem;
+            color: #1d4ed8;
+        }
+        #modal-view .dept-view-modal-content .offices-modal-subtitle {
+            margin-bottom: 1rem;
+            color: #475569;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid #dbeafe;
+        }
+        #modal-view .dept-view-top-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.65rem 0.9rem;
+            margin-bottom: 0.35rem;
+        }
+        #modal-view .dept-view-modal-content .offices-field {
+            margin-bottom: 0.7rem;
+        }
+        #modal-view .dept-view-modal-content .view-flow-row {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.6rem;
+        }
+        #modal-view .dept-view-modal-content .view-flow-item {
+            padding: 0.5rem 0.58rem;
+            border-radius: 8px;
+        }
+        #modal-view .dept-view-modal-content .view-flow-item:nth-child(1) { border-color: #bfd6f6; background: #eef5ff; }
+        #modal-view .dept-view-modal-content .view-flow-item:nth-child(1) svg { color: #3f6fae; }
+        #modal-view .dept-view-modal-content .view-flow-item:nth-child(2) { border-color: #bfe6d7; background: #ecf9f3; }
+        #modal-view .dept-view-modal-content .view-flow-item:nth-child(2) svg { color: #2f8a72; }
+        #modal-view .dept-view-modal-content .view-flow-item:nth-child(3) { border-color: #f2d29a; background: #fff5e3; }
+        #modal-view .dept-view-modal-content .view-flow-item:nth-child(3) svg { color: #a66c1c; }
+        #modal-view .dept-view-modal-content .view-flow-item:nth-child(4) { border-color: #d5cdf7; background: #f3f0ff; }
+        #modal-view .dept-view-modal-content .view-flow-item:nth-child(4) svg { color: #6256a6; }
+        #modal-view .offices-modal-actions {
+            margin-top: 1rem;
+            padding-top: 0.8rem;
+            border-top: 1px solid #e5e7eb;
+            position: sticky;
+            bottom: 0;
+            background: #fff;
+        }
         .dept-senders-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
         .dept-senders-item { display: flex; justify-content: space-between; align-items: center; gap: 0.8rem; padding: 0.55rem 0.7rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; }
         .dept-senders-item-main { min-width: 0; display: grid; gap: 0.12rem; }
@@ -832,6 +913,13 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
             .dept-view-top-grid { grid-template-columns: 1fr; }
             .dept-view-modal-content .view-flow-row { grid-template-columns: 1fr; }
             .offices-modal-content { padding: 1.15rem 1rem; }
+            #modal-view .dept-view-modal-content {
+                width: 100%;
+                max-width: 100%;
+                border-radius: 0;
+            }
+            #modal-view .dept-view-top-grid { grid-template-columns: 1fr; }
+            #modal-view .dept-view-modal-content .view-flow-row { grid-template-columns: 1fr; }
         }
         @media (max-width: 640px) {
             .dept-page-title { font-size: 1.1rem; }
@@ -975,7 +1063,12 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                 <div class="offices-modal-overlay" onclick="closeViewModal()"></div>
                 <div class="offices-modal-content dept-view-modal-content">
                     <button type="button" class="offices-modal-close" onclick="closeViewModal()" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg></button>
-                    <h3 id="view-modal-title">Department Details</h3>
+                    <div class="offcanvas-header">
+                        <span class="offcanvas-header-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M4 21V7l8-4 8 4v14"/><path d="M9 21v-6h6v6"/><path d="M9 10h.01"/><path d="M15 10h.01"/></svg>
+                        </span>
+                        <h3 id="view-modal-title">Department Details</h3>
+                    </div>
                     <p class="offices-modal-subtitle">View department information.</p>
                     <div class="dept-view-top-grid">
                         <div class="offices-field">
@@ -1002,9 +1095,6 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                     <div class="offices-field">
                         <p class="view-label">Created</p>
                         <p class="view-value" id="view-created">—</p>
-                    </div>
-                    <div class="offices-modal-actions">
-                        <button type="button" class="offices-btn offices-btn-secondary" onclick="closeViewModal()">Close</button>
                     </div>
                 </div>
             </div>
@@ -1216,9 +1306,27 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                     + '</span>'
                     + '</span>';
                 document.getElementById('view-created').textContent = d.created || '—';
-                document.getElementById('modal-view').style.display = 'flex';
+                var modal = document.getElementById('modal-view');
+                if (!modal) return;
+                if (window.__viewModalCloseTimer) {
+                    window.clearTimeout(window.__viewModalCloseTimer);
+                    window.__viewModalCloseTimer = null;
+                }
+                modal.style.display = 'flex';
+                window.requestAnimationFrame(function() {
+                    modal.classList.add('offcanvas-open');
+                });
             }
-            function closeViewModal() { document.getElementById('modal-view').style.display = 'none'; }
+            function closeViewModal() {
+                var modal = document.getElementById('modal-view');
+                if (!modal) return;
+                modal.classList.remove('offcanvas-open');
+                if (window.__viewModalCloseTimer) window.clearTimeout(window.__viewModalCloseTimer);
+                window.__viewModalCloseTimer = window.setTimeout(function() {
+                    modal.style.display = 'none';
+                    window.__viewModalCloseTimer = null;
+                }, 240);
+            }
             function formatFlowDateTime(raw, prefix) {
                 if (!raw) return prefix + ': —';
                 var ts = String(raw).trim();
