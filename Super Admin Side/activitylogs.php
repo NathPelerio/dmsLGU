@@ -67,8 +67,51 @@ $rowStart = (($currentPage - 1) * $perPage) + 1;
         .avatar-btn { width: 48px; height: 48px; padding: 0; border-radius: 10px; }
         .main-content .admin-content-body { padding-top: 24px; }
         .activity-user-meta { display: block; color: #64748b; font-size: 12px; margin-top: 2px; }
+        #logs-filter-form {
+            display: grid !important;
+            grid-template-columns: minmax(240px, 1fr) repeat(2, minmax(160px, 180px));
+            align-items: end;
+            justify-content: start;
+            column-gap: 10px;
+            row-gap: 6px;
+            margin-bottom: 8px;
+        }
+        #logs-filter-form #search-logs { width: 100%; min-width: 0; }
+        .activity-filter-field { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+        .activity-filter-field label { font-size: 12px; color: #475569; font-weight: 600; white-space: nowrap; line-height: 1; }
+        .activity-filter-field input[type="date"] { width: 100%; min-width: 160px; }
+        #logs-filter-form #search-logs,
+        #logs-filter-form .activity-filter-field input[type="date"] { height: 38px; }
+        .offices-card .offices-table thead th {
+            font-size: 12px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+        }
+        .offices-card .offices-table tbody td {
+            font-size: 13px;
+            padding-top: 9px;
+            padding-bottom: 9px;
+        }
+        .offices-card .offices-table tbody td:first-child { width: 60px; }
+        .offices-card .offices-table tbody tr.activity-row:nth-child(odd) { background: #ffffff; }
+        .offices-card .offices-table tbody tr.activity-row:nth-child(even) { background: #eef4ff; }
+        .offices-card .offices-table tbody tr.activity-row:hover { background: #dbeafe; }
+        .activity-pager { margin-top: 10px; }
+        .activity-pager-info { font-size: 12px; }
+        .activity-pager-btn { height: 30px; min-width: 74px; font-size: 12px; }
+        @media (max-width: 980px) {
+            #logs-filter-form {
+                grid-template-columns: minmax(0, 1fr) minmax(150px, 1fr) minmax(150px, 1fr);
+            }
+        }
+        @media (max-width: 760px) {
+            #logs-filter-form {
+                grid-template-columns: 1fr;
+                row-gap: 10px;
+            }
+            .activity-filter-field input[type="date"] { min-width: 0; }
+        }
         .activity-row { cursor: pointer; }
-        .activity-row:hover { background: #f8fbff; }
         .activity-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; }
         .activity-pager-info { color: #64748b; font-size: 13px; }
         .activity-pager-actions { display: inline-flex; align-items: center; gap: 8px; }
@@ -97,12 +140,17 @@ $rowStart = (($currentPage - 1) * $perPage) + 1;
         .activity-detail-head h3 { margin: 0; font-size: 1.05rem; color: #1e293b; }
         .activity-detail-close { border: none; background: transparent; color: #64748b; width: 32px; height: 32px; border-radius: 8px; cursor: pointer; font-size: 20px; line-height: 1; }
         .activity-detail-close:hover { background: #f1f5f9; color: #0f172a; }
-        .activity-detail-body { padding: 14px 16px 16px; display: grid; gap: 10px; }
+        .activity-detail-body { padding: 14px 16px 16px; display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
         .activity-detail-item { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px; background: #f8fafc; }
+        .activity-detail-item:last-child { grid-column: 1 / -1; }
         .activity-detail-item strong { display: block; font-size: 12px; color: #64748b; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .03em; }
-        .activity-detail-item span { color: #1e293b; font-size: 14px; word-break: break-word; }
+        .activity-detail-item span { color: #1e293b; font-size: 14px; word-break: break-word; overflow-wrap: anywhere; }
         .activity-detail-list { margin: 0; padding-left: 18px; color: #334155; font-size: 13px; }
-        .activity-detail-list li { margin-bottom: 4px; }
+        .activity-detail-list li { margin-bottom: 4px; overflow-wrap: anywhere; word-break: break-word; }
+        @media (max-width: 760px) {
+            .activity-detail-body { grid-template-columns: 1fr; }
+            .activity-detail-item:last-child { grid-column: auto; }
+        }
     </style>
 </head>
 <body>
@@ -128,12 +176,14 @@ $rowStart = (($currentPage - 1) * $perPage) + 1;
                 <section class="chart-card chart-card-wide offices-card">
                     <form method="get" class="offices-tools doc-filter-row" id="logs-filter-form" autocomplete="off">
                         <input type="text" id="search-logs" name="search" placeholder="Search by user or action" aria-label="Search" value="<?= htmlspecialchars($search) ?>">
-                        <input type="date" name="from_date" aria-label="From date" value="<?= htmlspecialchars($fromDate) ?>">
-                        <input type="date" name="to_date" aria-label="To date" value="<?= htmlspecialchars($toDate) ?>">
-                        <button type="submit" class="offices-btn offices-btn-secondary" id="search-logs-btn">
-                            <svg class="offices-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                            Search
-                        </button>
+                        <div class="activity-filter-field">
+                            <label for="logs-from-date">From</label>
+                            <input type="date" id="logs-from-date" name="from_date" aria-label="From date" value="<?= htmlspecialchars($fromDate) ?>">
+                        </div>
+                        <div class="activity-filter-field">
+                            <label for="logs-to-date">To</label>
+                            <input type="date" id="logs-to-date" name="to_date" aria-label="To date" value="<?= htmlspecialchars($toDate) ?>">
+                        </div>
                     </form>
 
                     <div class="offices-table-frame">
@@ -163,8 +213,21 @@ $rowStart = (($currentPage - 1) * $perPage) + 1;
                                         'ip_address' => (string)($row['ip_address'] ?? '—'),
                                         'details_summary' => (string)($row['details_summary'] ?? ''),
                                     ];
+                                    $rowSearchText = trim(implode(' ', [
+                                        (string)($row['actor_name'] ?? ''),
+                                        (string)($row['actor_role_text'] ?? ''),
+                                        (string)($row['action_text'] ?? ''),
+                                        (string)($row['module_text'] ?? ''),
+                                        (string)($row['status_text'] ?? ''),
+                                        (string)($row['ip_address'] ?? ''),
+                                        (string)($row['details_summary'] ?? ''),
+                                    ]));
+                                    $rowCreatedDate = trim((string)($row['created_at_date'] ?? ''));
                                 ?>
-                                <tr class="activity-row" data-log='<?= htmlspecialchars(json_encode($rowPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), ENT_QUOTES, "UTF-8") ?>'>
+                                <tr class="activity-row"
+                                    data-log='<?= htmlspecialchars(json_encode($rowPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), ENT_QUOTES, "UTF-8") ?>'
+                                    data-search="<?= htmlspecialchars(strtolower($rowSearchText), ENT_QUOTES, 'UTF-8') ?>"
+                                    data-created-date="<?= htmlspecialchars($rowCreatedDate, ENT_QUOTES, 'UTF-8') ?>">
                                     <td><?= (int)($rowStart + $idx) ?></td>
                                     <td>
                                         <?= htmlspecialchars((string)($row['actor_name'] ?? 'Unknown')) ?>
@@ -243,6 +306,101 @@ $rowStart = (($currentPage - 1) * $perPage) + 1;
     <?php $notifJsVer = @filemtime(__DIR__ . '/assets/js/super_admin_notifications.js') ?: time(); ?>
     <script src="assets/js/super_admin_notifications.js?v=<?= (int)$notifJsVer ?>"></script>
     <script>
+    (function() {
+        var filterForm = document.getElementById('logs-filter-form');
+        if (!filterForm) return;
+
+        var searchInput = document.getElementById('search-logs');
+        var fromDateInput = filterForm.querySelector('input[name="from_date"]');
+        var toDateInput = filterForm.querySelector('input[name="to_date"]');
+        var tableBody = document.getElementById('logs-table-body');
+        var dataRows = tableBody ? Array.prototype.slice.call(tableBody.querySelectorAll('.activity-row')) : [];
+        var debounceTimer = null;
+
+        function ensureNoLogsRow() {
+            if (!tableBody) return null;
+            var existing = document.getElementById('no-logs-row');
+            if (existing) return existing;
+            var row = document.createElement('tr');
+            var cell = document.createElement('td');
+            cell.colSpan = 7;
+            cell.className = 'offices-empty';
+            cell.id = 'no-logs-row';
+            row.appendChild(cell);
+            tableBody.appendChild(row);
+            return cell;
+        }
+
+        function rowMatchesDate(rowDate, fromDate, toDate) {
+            if (!rowDate) return (!fromDate && !toDate);
+            if (fromDate && rowDate < fromDate) return false;
+            if (toDate && rowDate > toDate) return false;
+            return true;
+        }
+
+        function applyLiveLogsFilter() {
+            if (!tableBody || dataRows.length === 0) return;
+
+            var query = String(searchInput ? searchInput.value : '').toLowerCase().trim();
+            var terms = query ? query.split(/\s+/).filter(Boolean) : [];
+            var fromDate = String(fromDateInput ? fromDateInput.value : '').trim();
+            var toDate = String(toDateInput ? toDateInput.value : '').trim();
+            var visibleCount = 0;
+            var visibleNo = 1;
+
+            dataRows.forEach(function(row) {
+                var haystack = String(row.getAttribute('data-search') || '').toLowerCase();
+                var rowDate = String(row.getAttribute('data-created-date') || '').trim();
+                var textMatched = terms.every(function(term) {
+                    return haystack.indexOf(term) !== -1;
+                });
+                var dateMatched = rowMatchesDate(rowDate, fromDate, toDate);
+                var matched = textMatched && dateMatched;
+
+                row.style.display = matched ? '' : 'none';
+                if (matched) {
+                    visibleCount += 1;
+                    var numberCell = row.querySelector('td');
+                    if (numberCell) numberCell.textContent = String(visibleNo++);
+                }
+            });
+
+            var noLogsCell = ensureNoLogsRow();
+            if (noLogsCell) {
+                noLogsCell.textContent = (query || fromDate || toDate)
+                    ? 'No activity logs found for the selected filters.'
+                    : 'No activity logs yet.';
+                noLogsCell.parentElement.style.display = visibleCount === 0 ? '' : 'none';
+            }
+        }
+
+        filterForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            applyLiveLogsFilter();
+        });
+
+        if (searchInput) {
+            searchInput.addEventListener('input', function() {
+                if (debounceTimer) window.clearTimeout(debounceTimer);
+                debounceTimer = window.setTimeout(applyLiveLogsFilter, 180);
+            });
+            searchInput.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (debounceTimer) window.clearTimeout(debounceTimer);
+                    applyLiveLogsFilter();
+                }
+            });
+        }
+
+        [fromDateInput, toDateInput].forEach(function(input) {
+            if (!input) return;
+            input.addEventListener('change', applyLiveLogsFilter);
+        });
+
+        applyLiveLogsFilter();
+    })();
+
     (function() {
         var overlay = document.getElementById('activity-detail-overlay');
         var closeBtn = document.getElementById('activity-detail-close');

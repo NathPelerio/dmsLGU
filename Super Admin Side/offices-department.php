@@ -66,7 +66,7 @@ function getUsers() {
         return $rows;
     } catch (Exception $e) {
         return [];
-    }
+    }   
 }
 
 /**
@@ -694,6 +694,14 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .dept-card-flow-stat { margin: 0; font-size: 0.95rem; color: #475569; display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.45rem 0.55rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; min-height: 36px; }
         .dept-card-flow-stat svg { width: 14px; height: 14px; color: #64748b; flex-shrink: 0; }
         .dept-card-flow-stat strong { color: #1e293b; font-weight: 700; font-size: 1rem; }
+        .dept-card-flow-stat:nth-child(1) { border-color: #bfd6f6; background: #eef5ff; }
+        .dept-card-flow-stat:nth-child(1) svg { color: #3f6fae; }
+        .dept-card-flow-stat:nth-child(2) { border-color: #bfe6d7; background: #ecf9f3; }
+        .dept-card-flow-stat:nth-child(2) svg { color: #2f8a72; }
+        .dept-card-flow-stat:nth-child(3) { border-color: #f2d29a; background: #fff5e3; }
+        .dept-card-flow-stat:nth-child(3) svg { color: #a66c1c; }
+        .dept-card-flow-stat:nth-child(4) { border-color: #d5cdf7; background: #f3f0ff; }
+        .dept-card-flow-stat:nth-child(4) svg { color: #6256a6; }
         .view-flow-value { font-size: 1.08rem !important; font-weight: 600; }
         .dept-card-created-section { margin-top: auto; padding-top: 0.75rem; border-top: 1px solid #e5e7eb; }
         .dept-card-created { font-size: 0.75rem; color: #94a3b8; margin: 0; font-family: ui-monospace, 'JetBrains Mono', monospace; }
@@ -889,18 +897,14 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                     <span class="dept-toast-text"><?= htmlspecialchars($msg) ?></span>
                 </div>
                 <?php endif; ?>
-                <div class="dept-content-actions">
-                    <button type="button" class="dept-add-btn" onclick="openAddModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Add Department</button>
-                </div>
-
                 <form method="get" id="dept-search-form" class="dept-search-row">
                     <div class="dept-search-wrap">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
                         <input type="text" name="search" class="dept-search" placeholder="Search departments..." aria-label="Search departments" value="<?= htmlspecialchars($search) ?>">
                     </div>
-                    <button type="submit" class="dept-filter-btn" aria-label="Filter">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
-                        Filter
+                    <button type="button" class="dept-add-btn" onclick="openAddModal()" aria-label="Add Department">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                        Add Department
                     </button>
                 </form>
 

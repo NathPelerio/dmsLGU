@@ -126,6 +126,37 @@ if (!function_exists('getActivityLogs')) {
         return ucwords($text);
     }
 
+    function activityPastTenseActionText($action) {
+        $human = activityLogHumanize($action);
+        if ($human === '') return 'Performed action';
+        $pairs = [
+            'Add' => 'Added',
+            'Archive' => 'Archived',
+            'Assign' => 'Assigned',
+            'Create' => 'Created',
+            'Delete' => 'Deleted',
+            'Disable' => 'Disabled',
+            'Edit' => 'Edited',
+            'Enable' => 'Enabled',
+            'Open' => 'Opened',
+            'Send' => 'Sent',
+            'Submit' => 'Submitted',
+            'Suspend' => 'Suspended',
+            'Update' => 'Updated',
+            'Upload' => 'Uploaded',
+        ];
+        foreach ($pairs as $present => $past) {
+            if ($human === $present) {
+                return $past;
+            }
+            $prefix = $present . ' ';
+            if (str_starts_with($human, $prefix)) {
+                return $past . substr($human, strlen($present));
+            }
+        }
+        return $human;
+    }
+
     function activityRoleText($role) {
         $r = strtolower(trim((string)$role));
         $map = [
@@ -235,7 +266,7 @@ if (!function_exists('getActivityLogs')) {
             case 'request_delete':
                 return 'Deleted data via API';
             default:
-                return 'Performed action: ' . activityLogHumanize($action);
+                return activityPastTenseActionText($action);
         }
     }
 
@@ -277,9 +308,11 @@ if (!function_exists('getActivityLogs')) {
         $result = [];
         foreach ($rows as $arr) {
             $createdFmt = '—';
+            $createdDate = '';
             $createdTs = dbToTimestamp($arr['created_at'] ?? null);
             if ($createdTs !== null) {
                 $createdFmt = (new DateTime('@' . $createdTs))->setTimezone(new DateTimeZone('Asia/Manila'))->format('M j, Y g:i A');
+                $createdDate = (new DateTime('@' . $createdTs))->setTimezone(new DateTimeZone('Asia/Manila'))->format('Y-m-d');
             }
 
             $detailsRaw = $arr['details'] ?? '';
@@ -359,6 +392,7 @@ if (!function_exists('getActivityLogs')) {
                 'status_text' => activityStatusText($status),
                 'ip_address' => trim((string)($arr['ip_address'] ?? '')),
                 'created_at_formatted' => $createdFmt,
+                'created_at_date' => $createdDate,
                 'details_summary' => implode(' | ', $detailSummary),
             ];
         }
