@@ -332,6 +332,84 @@
     flex-shrink: 0;
 }
 
+/* Hidden by default; shown only when photo viewer is opened */
+.profile-photo-view-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.6);
+    backdrop-filter: blur(2px);
+    z-index: 2200;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+}
+.profile-photo-view-overlay.profile-photo-view-open[aria-hidden="false"] {
+    display: flex;
+}
+.profile-photo-view-modal {
+    width: min(520px, 92vw);
+    background: #fff;
+    border: 1px solid #dbe7ff;
+    border-radius: 14px;
+    box-shadow: 0 24px 48px rgba(2, 6, 23, 0.26);
+    padding: 1rem 1rem 1.2rem;
+    position: relative;
+}
+.profile-photo-view-close {
+    position: absolute;
+    top: 0.65rem;
+    right: 0.65rem;
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+}
+.profile-photo-view-close:hover {
+    background: #e2e8f0;
+    color: #0f172a;
+}
+.profile-photo-view-close svg {
+    width: 18px;
+    height: 18px;
+}
+.profile-photo-view-title {
+    margin: 0 0 0.8rem 0;
+    color: #0f172a;
+    font-size: 1.15rem;
+    font-weight: 700;
+}
+.profile-photo-view-body {
+    min-height: 180px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.profile-photo-view-img-wrap {
+    width: 100%;
+    max-height: 60vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #f8fafc;
+}
+#profile-photo-view-img {
+    max-width: 100%;
+    max-height: 56vh;
+    object-fit: contain;
+}
+.profile-photo-view-empty {
+    margin: 0;
+    color: #64748b;
+    font-size: 0.95rem;
+}
+
 @media (max-width: 960px) {
     .profile-modal {
         width: min(760px, 94vw);

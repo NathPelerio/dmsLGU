@@ -4,6 +4,26 @@
  */
 require_once dirname(__DIR__) . '/db.php';
 
+if (!function_exists('activityLogHasModernSchema')) {
+    function activityLogHasModernSchema($pdo) {
+        static $cache = null;
+        if ($cache !== null) {
+            return $cache;
+        }
+        try {
+            $cols = [];
+            foreach ($pdo->query('SHOW COLUMNS FROM activity_logs') as $row) {
+                $cols[strtolower((string)($row['Field'] ?? ''))] = true;
+            }
+            $cache = isset($cols['actor_id']) && isset($cols['actor_name']) && isset($cols['status']) && isset($cols['module']);
+            return $cache;
+        } catch (Exception $e) {
+            $cache = true;
+            return $cache;
+        }
+    }
+}
+
 if (!function_exists('activityLog')) {
     function activityLog($config, $action, $details = [], $status = 'success', $actor = []) {
         $action = trim((string)$action);
@@ -46,25 +66,50 @@ if (!function_exists('activityLog')) {
 
         try {
             $pdo = dbPdo($config);
-            $stmt = $pdo->prepare(
-                'INSERT INTO activity_logs
-                    (action, status, module, details, actor_id, actor_name, actor_email, actor_role, ip_address, user_agent, created_at)
-                 VALUES
-                    (:action, :status, :module, :details, :actor_id, :actor_name, :actor_email, :actor_role, :ip_address, :user_agent, :created_at)'
-            );
-            $stmt->execute([
-                ':action' => $action,
-                ':status' => $status,
-                ':module' => $module,
-                ':details' => json_encode($safeDetails, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-                ':actor_id' => $actorId,
-                ':actor_name' => $actorName,
-                ':actor_email' => $actorEmail,
-                ':actor_role' => $actorRole,
-                ':ip_address' => $ipAddress,
-                ':user_agent' => $userAgent,
-                ':created_at' => dbNowUtcString(),
-            ]);
+            if (activityLogHasModernSchema($pdo)) {
+                $stmt = $pdo->prepare(
+                    'INSERT INTO activity_logs
+                        (action, status, module, details, actor_id, actor_name, actor_email, actor_role, ip_address, user_agent, created_at)
+                     VALUES
+                        (:action, :status, :module, :details, :actor_id, :actor_name, :actor_email, :actor_role, :ip_address, :user_agent, :created_at)'
+                );
+                $stmt->execute([
+                    ':action' => $action,
+                    ':status' => $status,
+                    ':module' => $module,
+                    ':details' => json_encode($safeDetails, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                    ':actor_id' => $actorId,
+                    ':actor_name' => $actorName,
+                    ':actor_email' => $actorEmail,
+                    ':actor_role' => $actorRole,
+                    ':ip_address' => $ipAddress,
+                    ':user_agent' => $userAgent,
+                    ':created_at' => dbNowUtcString(),
+                ]);
+            } else {
+                $legacyPayload = [
+                    'status' => $status,
+                    'module' => $module,
+                    'details' => $safeDetails,
+                    'actor_name' => $actorName,
+                    'actor_email' => $actorEmail,
+                    'actor_role' => $actorRole,
+                ];
+                $actorIdInt = ctype_digit($actorId) ? (int)$actorId : null;
+                $stmt = $pdo->prepare(
+                    'INSERT INTO activity_logs
+                        (user_id, action, description, ip_address, created_at)
+                     VALUES
+                        (:user_id, :action, :description, :ip_address, :created_at)'
+                );
+                $stmt->bindValue(':user_id', $actorIdInt, $actorIdInt === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
+                $stmt->bindValue(':action', $action, PDO::PARAM_STR);
+                $stmt->bindValue(':description', json_encode($legacyPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), PDO::PARAM_STR);
+                $stmt->bindValue(':ip_address', $ipAddress, PDO::PARAM_STR);
+                $stmt->bindValue(':created_at', dbNowUtcString(), PDO::PARAM_STR);
+                $stmt->execute();
+            }
+            $GLOBALS['__activity_log_written'] = true;
             return true;
         } catch (Exception $e) {
             return false;
@@ -159,6 +204,8 @@ if (!function_exists('getActivityLogs')) {
                 return $targetName !== '' ? ('Suspended user: ' . $targetName) : 'Suspended a user';
             case 'user_enable':
                 return $targetName !== '' ? ('Enabled user: ' . $targetName) : 'Enabled a user';
+            case 'user_edit':
+                return $targetName !== '' ? ('Updated user: ' . $targetName) : 'Updated a user';
             case 'office_add':
                 return $officeName !== '' ? ('Added office: ' . $officeName) : 'Added an office';
             case 'office_update':
@@ -177,17 +224,33 @@ if (!function_exists('getActivityLogs')) {
                 return $docTitle !== '' ? ('Sent document to super admin: ' . $docTitle) : 'Sent document to super admin';
             case 'document_send_to_department_heads':
                 return $docTitle !== '' ? ('Sent document to department heads: ' . $docTitle) : 'Sent document to department heads';
+            case 'request_get':
+                return 'Opened a page';
+            case 'request_post':
+                return 'Submitted data';
+            case 'request_put':
+                return 'Updated data via API';
+            case 'request_patch':
+                return 'Patched data via API';
+            case 'request_delete':
+                return 'Deleted data via API';
             default:
                 return 'Performed action: ' . activityLogHumanize($action);
         }
     }
 
-    function activityBuildSqlFilter($search, $fromDate, $toDate, &$params) {
+    function activityBuildSqlFilter($search, $fromDate, $toDate, &$params, $legacy = false) {
         $where = [];
         $params = [];
+        // Keep page-open fallback noise hidden by default.
+        $where[] = $legacy ? "l.action NOT LIKE 'request_%'" : "action NOT LIKE 'request_%'";
         $search = trim((string)$search);
         if ($search !== '') {
-            $where[] = '(actor_name LIKE :search OR actor_email LIKE :search OR actor_role LIKE :search OR action LIKE :search OR module LIKE :search OR status LIKE :search OR JSON_UNQUOTE(JSON_EXTRACT(details, "$.reason")) LIKE :search)';
+            if ($legacy) {
+                $where[] = '(COALESCE(u.name, "") LIKE :search OR COALESCE(u.email, "") LIKE :search OR COALESCE(u.role, "") LIKE :search OR l.action LIKE :search OR COALESCE(l.description, "") LIKE :search)';
+            } else {
+                $where[] = '(actor_name LIKE :search OR actor_email LIKE :search OR actor_role LIKE :search OR action LIKE :search OR module LIKE :search OR status LIKE :search OR JSON_UNQUOTE(JSON_EXTRACT(details, "$.reason")) LIKE :search)';
+            }
             $params[':search'] = '%' . $search . '%';
         }
 
@@ -221,6 +284,7 @@ if (!function_exists('getActivityLogs')) {
 
             $detailsRaw = $arr['details'] ?? '';
             $details = [];
+            $legacyPayload = [];
             if (is_string($detailsRaw) && $detailsRaw !== '') {
                 $decoded = json_decode($detailsRaw, true);
                 if (is_array($decoded)) {
@@ -228,6 +292,20 @@ if (!function_exists('getActivityLogs')) {
                 }
             } elseif (is_array($detailsRaw)) {
                 $details = $detailsRaw;
+            }
+            if (empty($details)) {
+                $descRaw = $arr['description'] ?? '';
+                if (is_string($descRaw) && $descRaw !== '') {
+                    $decodedDesc = json_decode($descRaw, true);
+                    if (is_array($decodedDesc)) {
+                        $legacyPayload = $decodedDesc;
+                        if (isset($decodedDesc['details']) && is_array($decodedDesc['details'])) {
+                            $details = $decodedDesc['details'];
+                        } else {
+                            $details = $decodedDesc;
+                        }
+                    }
+                }
             }
 
             $detailSummary = [];
@@ -259,15 +337,20 @@ if (!function_exists('getActivityLogs')) {
                 }
                 $detailSummary[] = $label . ': ' . $value;
             }
-            $module = trim((string)($arr['module'] ?? ''));
+            $module = trim((string)($arr['module'] ?? ($legacyPayload['module'] ?? '')));
             if ($module === '') $module = 'app';
-            $status = trim((string)($arr['status'] ?? 'success'));
+            $status = trim((string)($arr['status'] ?? ($legacyPayload['status'] ?? 'success')));
             if ($status === '') $status = 'success';
+            $actorName = trim((string)($arr['actor_name'] ?? ($legacyPayload['actor_name'] ?? 'Unknown')));
+            if ($actorName === '') {
+                $actorName = 'Unknown';
+            }
+            $actorRole = trim((string)($arr['actor_role'] ?? ($legacyPayload['actor_role'] ?? '')));
 
             $result[] = [
-                'actor_name' => trim((string)($arr['actor_name'] ?? 'Unknown')),
-                'actor_role' => trim((string)($arr['actor_role'] ?? '')),
-                'actor_role_text' => activityRoleText((string)($arr['actor_role'] ?? '')),
+                'actor_name' => $actorName,
+                'actor_role' => $actorRole,
+                'actor_role_text' => activityRoleText($actorRole),
                 'action' => trim((string)($arr['action'] ?? '')),
                 'action_text' => activityLogActionText((string)($arr['action'] ?? ''), $details),
                 'module' => $module,
@@ -290,8 +373,24 @@ if (!function_exists('getActivityLogs')) {
         try {
             $pdo = dbPdo($config);
             $params = [];
-            $where = activityBuildSqlFilter($search, $fromDate, $toDate, $params);
-            $sql = 'SELECT * FROM activity_logs ' . $where . ' ORDER BY created_at DESC LIMIT ' . (int)$limit;
+            $legacy = !activityLogHasModernSchema($pdo);
+            $where = activityBuildSqlFilter($search, $fromDate, $toDate, $params, $legacy);
+            if ($legacy) {
+                $sql = 'SELECT
+                            l.action,
+                            l.description,
+                            l.ip_address,
+                            l.created_at,
+                            COALESCE(NULLIF(u.name, ""), NULLIF(u.email, ""), "Unknown") AS actor_name,
+                            COALESCE(u.role, "") AS actor_role
+                        FROM activity_logs l
+                        LEFT JOIN users u ON u.user_id = l.user_id
+                        ' . $where . '
+                        ORDER BY l.created_at DESC
+                        LIMIT ' . (int)$limit;
+            } else {
+                $sql = 'SELECT * FROM activity_logs ' . $where . ' ORDER BY created_at DESC LIMIT ' . (int)$limit;
+            }
             $stmt = $pdo->prepare($sql);
             $stmt->execute($params);
             return activityRowsToViewRows($stmt->fetchAll());
@@ -313,8 +412,11 @@ if (!function_exists('getActivityLogsPage')) {
         try {
             $pdo = dbPdo($config);
             $params = [];
-            $where = activityBuildSqlFilter($search, $fromDate, $toDate, $params);
-            $countSql = 'SELECT COUNT(*) AS total_count FROM activity_logs ' . $where;
+            $legacy = !activityLogHasModernSchema($pdo);
+            $where = activityBuildSqlFilter($search, $fromDate, $toDate, $params, $legacy);
+            $countSql = $legacy
+                ? ('SELECT COUNT(*) AS total_count FROM activity_logs l LEFT JOIN users u ON u.user_id = l.user_id ' . $where)
+                : ('SELECT COUNT(*) AS total_count FROM activity_logs ' . $where);
             $countStmt = $pdo->prepare($countSql);
             $countStmt->execute($params);
             $countRow = $countStmt->fetch();
@@ -326,7 +428,22 @@ if (!function_exists('getActivityLogsPage')) {
                 $skip = ($page - 1) * $perPage;
             }
 
-            $sql = 'SELECT * FROM activity_logs ' . $where . ' ORDER BY created_at DESC LIMIT :offset, :limit';
+            if ($legacy) {
+                $sql = 'SELECT
+                            l.action,
+                            l.description,
+                            l.ip_address,
+                            l.created_at,
+                            COALESCE(NULLIF(u.name, ""), NULLIF(u.email, ""), "Unknown") AS actor_name,
+                            COALESCE(u.role, "") AS actor_role
+                        FROM activity_logs l
+                        LEFT JOIN users u ON u.user_id = l.user_id
+                        ' . $where . '
+                        ORDER BY l.created_at DESC
+                        LIMIT :offset, :limit';
+            } else {
+                $sql = 'SELECT * FROM activity_logs ' . $where . ' ORDER BY created_at DESC LIMIT :offset, :limit';
+            }
             $stmt = $pdo->prepare($sql);
             foreach ($params as $k => $v) {
                 $stmt->bindValue($k, $v);

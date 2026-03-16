@@ -11,7 +11,7 @@
  Target Server Version : 100432 (10.4.32-MariaDB)
  File Encoding         : 65001
 
- Date: 12/03/2026 09:25:48
+ Date: 12/03/2026 09:48:11
 */
 
 SET NAMES utf8mb4;
@@ -173,13 +173,14 @@ CREATE TABLE `documents`  (
   CONSTRAINT `documents_ibfk_1` FOREIGN KEY (`received_by`) REFERENCES `users` (`user_id`) ON DELETE RESTRICT ON UPDATE RESTRICT,
   CONSTRAINT `documents_ibfk_2` FOREIGN KEY (`requestor_office_id`) REFERENCES `offices` (`office_id`) ON DELETE RESTRICT ON UPDATE RESTRICT,
   CONSTRAINT `documents_ibfk_created_by` FOREIGN KEY (`created_by`) REFERENCES `users` (`user_id`) ON DELETE RESTRICT ON UPDATE RESTRICT
-) ENGINE = InnoDB AUTO_INCREMENT = 3 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = DYNAMIC;
+) ENGINE = InnoDB AUTO_INCREMENT = 4 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Records of documents
 -- ----------------------------
 INSERT INTO `documents` VALUES (1, 'dawdwd', 'wdwdwad', '', 'rentwise.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 23654, 'c02b084ec458b874a185da3355b0024f6e9d84a75f5216ccd2884204050fb2b9', 'storage/documents/20260312_005208_892302bcce_rentwise.docx', NULL, NULL, NULL, NULL, NULL, 'active', NULL, 0, NULL, NULL, '2026-03-12 00:52:08', NULL);
 INSERT INTO `documents` VALUES (2, 'dwdwd', 'wdwdwad', '', 'rentwise.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 23654, 'c02b084ec458b874a185da3355b0024f6e9d84a75f5216ccd2884204050fb2b9', 'storage/documents/20260312_005430_ed79b19332_rentwise.docx', NULL, NULL, NULL, NULL, NULL, 'active', 'dwdwadwawd', 0, NULL, NULL, '2026-03-12 00:54:30', '2026-03-12 01:18:43');
+INSERT INTO `documents` VALUES (3, 'DOC-112', 'Gae', '', 'rentwise.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 23654, 'c02b084ec458b874a185da3355b0024f6e9d84a75f5216ccd2884204050fb2b9', 'storage/documents/20260312_014001_3ea04b86989b_rentwise.docx', NULL, NULL, NULL, NULL, NULL, 'active', NULL, 0, 3, NULL, '2026-03-12 01:40:01', NULL);
 
 -- ----------------------------
 -- Table structure for notifications
@@ -199,13 +200,14 @@ CREATE TABLE `notifications`  (
   INDEX `idx_notifications_user`(`user_id` ASC) USING BTREE,
   CONSTRAINT `notifications_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE RESTRICT ON UPDATE RESTRICT,
   CONSTRAINT `notifications_ibfk_2` FOREIGN KEY (`document_id`) REFERENCES `documents` (`document_id`) ON DELETE RESTRICT ON UPDATE RESTRICT
-) ENGINE = InnoDB AUTO_INCREMENT = 3 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = DYNAMIC;
+) ENGINE = InnoDB AUTO_INCREMENT = 4 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Records of notifications
 -- ----------------------------
-INSERT INTO `notifications` VALUES (1, 2, 2, 'document_route', 'Jean Pelerio routed a document to your office', '../department%20heads%20Side/department_documents.php?highlight=2', 0, '2026-03-12 01:04:27');
+INSERT INTO `notifications` VALUES (1, 2, 2, 'document_route', 'Jean Pelerio routed a document to your office', '../department%20heads%20Side/department_documents.php?highlight=2', 1, '2026-03-12 01:04:27');
 INSERT INTO `notifications` VALUES (2, 2, 2, 'document_route', 'Jean Pelerio routed a document to your office', '../department%20heads%20Side/department_documents.php?highlight=2', 1, '2026-03-12 01:18:43');
+INSERT INTO `notifications` VALUES (3, 1, 3, 'document_upload', 'Edwin Buado uploaded a new document: Gae (DOC-112)', 'documents.php?highlight=3', 0, '2026-03-12 09:40:02');
 
 -- ----------------------------
 -- Table structure for offices
@@ -281,12 +283,13 @@ CREATE TABLE `users`  (
   UNIQUE INDEX `uq_users_username`(`username` ASC) USING BTREE,
   INDEX `office_id`(`office_id` ASC) USING BTREE,
   CONSTRAINT `users_ibfk_1` FOREIGN KEY (`office_id`) REFERENCES `offices` (`office_id`) ON DELETE RESTRICT ON UPDATE RESTRICT
-) ENGINE = InnoDB AUTO_INCREMENT = 3 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = DYNAMIC;
+) ENGINE = InnoDB AUTO_INCREMENT = 4 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Records of users
 -- ----------------------------
 INSERT INTO `users` VALUES (1, 'Jean Pelerio', 'jeanXnathan', 'superadmin@gmail.com', 'superadmin123', 'superadmin', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 18.00, 82.00, 84.00, '2026-03-12 08:45:18', NULL);
 INSERT INTO `users` VALUES (2, 'Jik Gaelapon', 'adobo', 'albertacangan@gmail.com', '$2y$10$PSpOtUB37lJhA4y9lpZcA.xuFOU1083aOpjPclS31sYxQ1emolIUq', 'department_head', 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 18.00, 82.00, 84.00, '2026-03-12 00:48:05', '2026-03-12 09:00:52');
+INSERT INTO `users` VALUES (3, 'Edwin Buado', 'boogie', 'edwinbuado092001@gmail.com', '$2y$10$DFwvKadVXHy0UAqy9q39teiFmaCqC/a0NW9Y/KAwPc2fxEEstfFNe', 'staff', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 18.00, 82.00, 84.00, '2026-03-12 01:33:12', NULL);
 
 SET FOREIGN_KEY_CHECKS = 1;
