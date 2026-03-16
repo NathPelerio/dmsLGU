@@ -44,6 +44,129 @@ function documentTableColumns($pdo) {
     return $cols;
 }
 
+function ensureDocumentCommentsColumn($pdo) {
+    static $checked = false;
+    static $exists = false;
+    if ($checked) {
+        return $exists;
+    }
+    $checked = true;
+    try {
+        $colStmt = $pdo->query("SHOW COLUMNS FROM documents LIKE 'comments'");
+        $colRow = $colStmt ? $colStmt->fetch() : null;
+        if ($colRow) {
+            $exists = true;
+            $type = strtolower(trim((string)($colRow['Type'] ?? '')));
+            if (strpos($type, 'longtext') === false) {
+                $pdo->exec("ALTER TABLE documents MODIFY COLUMN comments LONGTEXT NULL");
+            }
+            return true;
+        }
+    } catch (Exception $e) {
+        // Fall back to add/refresh flow below.
+    }
+    try {
+        $pdo->exec("ALTER TABLE documents ADD COLUMN comments LONGTEXT NULL AFTER notes");
+        $exists = true;
+        return true;
+    } catch (Exception $e) {
+        $cols = documentTableColumns($pdo);
+        $exists = isset($cols['comments']);
+        return $exists;
+    }
+}
+
+function parseDocumentComments($raw) {
+    $json = trim((string)$raw);
+    if ($json === '') {
+        return [];
+    }
+    $decoded = json_decode($json, true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+    $normalized = [];
+    foreach ($decoded as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $id = trim((string)($item['id'] ?? ''));
+        $text = trim((string)($item['text'] ?? ''));
+        $attachmentDataUrl = trim((string)($item['attachment_data_url'] ?? ''));
+        if ($id === '' || ($text === '' && $attachmentDataUrl === '')) {
+            continue;
+        }
+        $normalized[] = [
+            'id' => $id,
+            'user_id' => trim((string)($item['user_id'] ?? '')),
+            'user_name' => trim((string)($item['user_name'] ?? 'User')),
+            'text' => $text,
+            'created_at' => trim((string)($item['created_at'] ?? dbNowUtcString())),
+            'updated_at' => trim((string)($item['updated_at'] ?? '')),
+            'attachment_name' => trim((string)($item['attachment_name'] ?? '')),
+            'attachment_type' => trim((string)($item['attachment_type'] ?? '')),
+            'attachment_size' => (int)($item['attachment_size'] ?? 0),
+            'attachment_data_url' => trim((string)($item['attachment_data_url'] ?? '')),
+        ];
+    }
+    return $normalized;
+}
+
+function encodeDocumentComments(array $comments) {
+    return json_encode(array_values($comments), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+function formatCommentTime($utcOrLocalDate) {
+    $value = trim((string)$utcOrLocalDate);
+    if ($value === '') {
+        return '';
+    }
+    try {
+        $dt = new DateTime($value, new DateTimeZone('UTC'));
+        $dt->setTimezone(new DateTimeZone('Asia/Manila'));
+        return $dt->format('M j, Y g:i A');
+    } catch (Exception $e) {
+        return $value;
+    }
+}
+
+function appendDocumentCommentByDocId($pdo, $docIdCol, $docId, $userId, $userName, $text, $attachment = null) {
+    $commentText = trim((string)$text);
+    $attachmentName = trim((string)($attachment['name'] ?? ''));
+    $attachmentType = trim((string)($attachment['type'] ?? ''));
+    $attachmentDataUrl = trim((string)($attachment['data_url'] ?? ''));
+    $attachmentSize = (int)($attachment['size'] ?? 0);
+    if ($commentText === '' && $attachmentDataUrl === '') {
+        return;
+    }
+
+    $sel = $pdo->prepare('SELECT comments FROM documents WHERE ' . $docIdCol . ' = :id LIMIT 1');
+    $sel->execute([':id' => (int)$docId]);
+    $row = $sel->fetch();
+    if (!$row) {
+        return;
+    }
+    $comments = parseDocumentComments($row['comments'] ?? '');
+    $comments[] = [
+        'id' => bin2hex(random_bytes(8)),
+        'user_id' => trim((string)$userId),
+        'user_name' => trim((string)$userName) !== '' ? trim((string)$userName) : 'User',
+        'text' => $commentText,
+        'created_at' => dbNowUtcString(),
+        'updated_at' => '',
+        'attachment_name' => $attachmentName,
+        'attachment_type' => $attachmentType,
+        'attachment_size' => max(0, $attachmentSize),
+        'attachment_data_url' => $attachmentDataUrl,
+    ];
+    $up = $pdo->prepare('UPDATE documents SET comments = :comments, updated_at = :updated_at WHERE ' . $docIdCol . ' = :id');
+    $up->execute([
+        ':comments' => encodeDocumentComments($comments),
+        ':updated_at' => dbNowUtcString(),
+        ':id' => (int)$docId,
+    ]);
+}
+
 function superAdminDocMimeFromName($name, $fallback = 'application/octet-stream') {
     $ext = strtolower((string)pathinfo((string)$name, PATHINFO_EXTENSION));
     if (in_array($ext, ['jpg', 'jpeg'], true)) return 'image/jpeg';
@@ -234,6 +357,161 @@ if (isset($_GET['stamp_for_sent'])) {
 }
 
 // Send document to Admin Side with per-document stamp placement.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && in_array($_POST['action'], ['add_document_comment', 'edit_document_comment', 'delete_document_comment'], true)) {
+    $docId = trim((string)($_POST['document_id'] ?? ''));
+    $commentId = trim((string)($_POST['comment_id'] ?? ''));
+    $commentText = trim((string)($_POST['comment_text'] ?? ''));
+    $attachmentName = trim((string)($_POST['comment_attachment_name'] ?? ''));
+    $attachmentType = trim((string)($_POST['comment_attachment_type'] ?? ''));
+    $attachmentDataUrl = trim((string)($_POST['comment_attachment_data_url'] ?? ''));
+    $attachmentSize = (int)($_POST['comment_attachment_size'] ?? 0);
+    $isAjax = (string)($_POST['ajax'] ?? '') === '1'
+        || strtolower((string)($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
+
+    if ($docId === '' || !ctype_digit($docId)) {
+        if ($isAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'error' => 'Invalid document id.']);
+            exit;
+        }
+        header('Location: documents.php?send_error=1');
+        exit;
+    }
+
+    try {
+        $pdo = dbPdo($config);
+        ensureDocumentCommentsColumn($pdo);
+        $docCols = documentTableColumns($pdo);
+        $docIdCol = isset($docCols['document_id']) ? 'document_id' : 'id';
+        $currentUserId = trim((string)($_SESSION['user_id'] ?? ''));
+        $currentUserName = trim((string)($_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User'));
+        if ($currentUserName === '') {
+            $currentUserName = 'User';
+        }
+
+        $sel = $pdo->prepare('SELECT comments FROM documents WHERE ' . $docIdCol . ' = :id LIMIT 1');
+        $sel->execute([':id' => (int)$docId]);
+        $docRow = $sel->fetch();
+        if (!$docRow) {
+            throw new RuntimeException('Document not found.');
+        }
+        $comments = parseDocumentComments($docRow['comments'] ?? '');
+
+        $action = (string)$_POST['action'];
+        $updatedComment = null;
+        if ($action === 'add_document_comment') {
+            $hasAttachment = ($attachmentDataUrl !== '');
+            if ($commentText === '' && !$hasAttachment) {
+                throw new RuntimeException('Comment or attachment is required.');
+            }
+            if ($hasAttachment && !preg_match('/^data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,/i', $attachmentDataUrl)) {
+                throw new RuntimeException('Invalid attachment format.');
+            }
+            $newComment = [
+                'id' => bin2hex(random_bytes(8)),
+                'user_id' => $currentUserId,
+                'user_name' => $currentUserName,
+                'text' => $commentText,
+                'created_at' => dbNowUtcString(),
+                'updated_at' => '',
+                'attachment_name' => $hasAttachment ? $attachmentName : '',
+                'attachment_type' => $hasAttachment ? $attachmentType : '',
+                'attachment_size' => $hasAttachment ? max(0, $attachmentSize) : 0,
+                'attachment_data_url' => $hasAttachment ? $attachmentDataUrl : '',
+            ];
+            $comments[] = $newComment;
+            $updatedComment = $newComment;
+        } elseif ($action === 'edit_document_comment') {
+            if ($commentId === '' || $commentText === '') {
+                throw new RuntimeException('Missing comment details.');
+            }
+            $found = false;
+            foreach ($comments as &$c) {
+                if ((string)($c['id'] ?? '') !== $commentId) {
+                    continue;
+                }
+                if ((string)($c['user_id'] ?? '') !== $currentUserId) {
+                    throw new RuntimeException('You can only edit your own comments.');
+                }
+                $c['text'] = $commentText;
+                $c['updated_at'] = dbNowUtcString();
+                $updatedComment = $c;
+                $found = true;
+                break;
+            }
+            unset($c);
+            if (!$found) {
+                throw new RuntimeException('Comment not found.');
+            }
+        } elseif ($action === 'delete_document_comment') {
+            if ($commentId === '') {
+                throw new RuntimeException('Missing comment id.');
+            }
+            $before = count($comments);
+            $comments = array_values(array_filter($comments, function ($c) use ($commentId, $currentUserId) {
+                if (!is_array($c)) {
+                    return false;
+                }
+                $id = (string)($c['id'] ?? '');
+                $authorId = (string)($c['user_id'] ?? '');
+                if ($id !== $commentId) {
+                    return true;
+                }
+                if ($authorId !== $currentUserId) {
+                    throw new RuntimeException('You can only delete your own comments.');
+                }
+                return false;
+            }));
+            if (count($comments) === $before) {
+                throw new RuntimeException('Comment not found.');
+            }
+        }
+
+        $up = $pdo->prepare('UPDATE documents SET comments = :comments, updated_at = :updated_at WHERE ' . $docIdCol . ' = :id');
+        $up->execute([
+            ':comments' => encodeDocumentComments($comments),
+            ':updated_at' => dbNowUtcString(),
+            ':id' => (int)$docId,
+        ]);
+
+        if ($isAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            $responseComment = null;
+            if (is_array($updatedComment)) {
+                $responseComment = [
+                    'id' => (string)($updatedComment['id'] ?? ''),
+                    'user_name' => (string)($updatedComment['user_name'] ?? ''),
+                    'text' => (string)($updatedComment['text'] ?? ''),
+                    'time_label' => formatCommentTime($updatedComment['updated_at'] !== '' ? $updatedComment['updated_at'] : $updatedComment['created_at']),
+                    'is_edited' => trim((string)($updatedComment['updated_at'] ?? '')) !== '',
+                    'attachment_name' => (string)($updatedComment['attachment_name'] ?? ''),
+                    'attachment_type' => (string)($updatedComment['attachment_type'] ?? ''),
+                    'attachment_size' => (int)($updatedComment['attachment_size'] ?? 0),
+                    'attachment_data_url' => (string)($updatedComment['attachment_data_url'] ?? ''),
+                ];
+            }
+            echo json_encode([
+                'ok' => true,
+                'action' => $action,
+                'comment_id' => $commentId,
+                'comment' => $responseComment,
+                'count' => count($comments),
+            ]);
+            exit;
+        }
+        header('Location: documents.php?doc=' . urlencode($docId));
+        exit;
+    } catch (Exception $e) {
+        if ($isAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+            exit;
+        }
+        header('Location: documents.php?send_error=1&detail=' . urlencode($e->getMessage()));
+        exit;
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'send_to_admin') {
     $sendId = trim((string)($_POST['document_id'] ?? ''));
     $stampWidth = max(5, min(60, (float)($_POST['stamp_width_pct'] ?? 18)));
@@ -249,6 +527,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $pdo = dbPdo($config);
         $sessionUserId = resolveSuperAdminSessionUserId($pdo);
         ensureSuperAdminStampColumns($config);
+        ensureDocumentCommentsColumn($pdo);
         $docCols = documentTableColumns($pdo);
         $docIdCol = isset($docCols['document_id']) ? 'document_id' : 'id';
         $docCodeExpr = isset($docCols['tracking_code']) ? 'tracking_code' : (isset($docCols['document_code']) ? 'document_code' : "''");
@@ -300,8 +579,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 ':sent_at' => dbNowUtcString(),
             ]);
             if ($postedNotes !== '') {
-                $noteUp = $pdo->prepare('UPDATE documents SET notes = :notes, updated_at = :updated_at WHERE ' . $docIdCol . ' = :id');
-                $noteUp->execute([':notes' => $postedNotes, ':updated_at' => dbNowUtcString(), ':id' => (int)$sendId]);
+                appendDocumentCommentByDocId(
+                    $pdo,
+                    $docIdCol,
+                    (int)$sendId,
+                    (string)($_SESSION['user_id'] ?? ''),
+                    (string)($_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User'),
+                    $postedNotes
+                );
             }
             activityLog($config, 'document_send_to_admin', [
                 'module' => 'super_admin_documents',
@@ -329,6 +614,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         try {
             $pdo = dbPdo($config);
             $sessionUserId = resolveSuperAdminSessionUserId($pdo);
+            ensureDocumentCommentsColumn($pdo);
             $docCols = documentTableColumns($pdo);
             $docIdCol = isset($docCols['document_id']) ? 'document_id' : 'id';
             $docStmt = $pdo->prepare('SELECT 1 FROM documents WHERE ' . $docIdCol . ' = :id LIMIT 1');
@@ -400,8 +686,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 }
                 if ($sentCount > 0) {
                     if ($postedNotes !== '') {
-                        $noteUp = $pdo->prepare('UPDATE documents SET notes = :notes, updated_at = :updated_at WHERE ' . $docIdCol . ' = :id');
-                        $noteUp->execute([':notes' => $postedNotes, ':updated_at' => dbNowUtcString(), ':id' => (int)$docId]);
+                        appendDocumentCommentByDocId(
+                            $pdo,
+                            $docIdCol,
+                            (int)$docId,
+                            (string)($_SESSION['user_id'] ?? ''),
+                            (string)($_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'User'),
+                            $postedNotes
+                        );
                     }
                     activityLog($config, 'document_send_to_department_heads', [
                         'module' => 'super_admin_documents',
@@ -626,14 +918,45 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
 $progressEvents = [];
 $currentHolderLabel = 'No holder yet';
 $superAdminNote = '';
+$documentComments = [];
+$sessionUserIdRaw = trim((string)($_SESSION['user_id'] ?? ''));
 if ($isViewMode) {
     try {
         $pdo = dbPdo($config);
-        $noteStmt = $pdo->prepare('SELECT notes FROM documents WHERE id = :id LIMIT 1');
-        $noteStmt->execute([':id' => $selectedDocumentId]);
+        ensureDocumentCommentsColumn($pdo);
+        $docCols = documentTableColumns($pdo);
+        $docIdCol = isset($docCols['document_id']) ? 'document_id' : 'id';
+        $noteStmt = $pdo->prepare('SELECT notes, comments FROM documents WHERE ' . $docIdCol . ' = :id LIMIT 1');
+        $noteStmt->execute([':id' => (int)$selectedDocumentId]);
         $noteRow = $noteStmt->fetch();
         if ($noteRow) {
             $superAdminNote = trim((string)($noteRow['notes'] ?? ''));
+            $storedComments = parseDocumentComments($noteRow['comments'] ?? '');
+            foreach ($storedComments as $commentRow) {
+                $authorName = trim((string)($commentRow['user_name'] ?? 'User'));
+                if ($authorName === '') {
+                    $authorName = 'User';
+                }
+                $authorId = trim((string)($commentRow['user_id'] ?? ''));
+                $isMine = ($sessionUserIdRaw !== '' && $authorId !== '' && $authorId === $sessionUserIdRaw);
+                $timeSource = trim((string)($commentRow['updated_at'] ?? '')) !== ''
+                    ? (string)$commentRow['updated_at']
+                    : (string)($commentRow['created_at'] ?? '');
+                $documentComments[] = [
+                    'id' => (string)($commentRow['id'] ?? ''),
+                    'user_name' => $authorName,
+                    'text' => (string)($commentRow['text'] ?? ''),
+                    'time_label' => formatCommentTime($timeSource),
+                    'is_edited' => trim((string)($commentRow['updated_at'] ?? '')) !== '',
+                    'can_edit' => $isMine,
+                    'avatar_class' => $isMine ? 'sa' : 'dh',
+                    'avatar_letter' => mb_strtoupper(mb_substr($authorName, 0, 1)),
+                    'attachment_name' => (string)($commentRow['attachment_name'] ?? ''),
+                    'attachment_type' => (string)($commentRow['attachment_type'] ?? ''),
+                    'attachment_size' => (int)($commentRow['attachment_size'] ?? 0),
+                    'attachment_data_url' => (string)($commentRow['attachment_data_url'] ?? ''),
+                ];
+            }
         }
         $routeStmt = $pdo->prepare(
             'SELECT sth.office_name, sth.sent_by_user_name, sth.sent_at, sth.read_at
@@ -870,8 +1193,12 @@ if ($isViewMode) {
         .comments-list {
             flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px;
             display: flex; flex-direction: column; gap: 10px;
+            overflow-x: hidden;
         }
-        .comment-item { display: flex; gap: 10px; align-items: flex-start; }
+        .comment-item { display: flex; gap: 10px; align-items: flex-start; width: 100%; justify-content: flex-start; }
+        .comment-item.own { justify-content: flex-end; }
+        .comment-item.own .comment-avatar { order: 2; }
+        .comment-item.own .comment-body { order: 1; }
         .comment-avatar {
             width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
             display: flex; align-items: center; justify-content: center;
@@ -879,18 +1206,92 @@ if ($isViewMode) {
         }
         .comment-avatar.sa { background: #1e40af; }
         .comment-avatar.dh { background: #0f766e; }
-        .comment-body { flex: 1; min-width: 0; }
+        .comment-body { flex: 0 1 auto; min-width: 0; max-width: min(70%, 320px); }
+        .comment-item:not(.own) .comment-body { margin-right: auto; }
+        .comment-item.own .comment-body { margin-left: auto; }
         .comment-meta { display: flex; align-items: center; gap: 8px; }
+        .comment-item.own .comment-meta { justify-content: flex-end; }
+        .comment-menu-wrap {
+            position: relative;
+            opacity: 0;
+            pointer-events: none;
+            transform: translateX(-4px);
+            transition: opacity 0.12s ease, transform 0.12s ease;
+        }
+        .comment-item:hover .comment-menu-wrap,
+        .comment-item.menu-open .comment-menu-wrap {
+            opacity: 1;
+            pointer-events: auto;
+            transform: translateX(0);
+        }
+        .comment-menu-btn {
+            width: 24px;
+            height: 24px;
+            border: none;
+            border-radius: 999px;
+            background: transparent;
+            color: #64748b;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .comment-menu-btn:hover { background: #e2e8f0; color: #334155; }
+        .comment-menu-btn svg { width: 15px; height: 15px; }
+        .comment-menu {
+            position: absolute;
+            left: 0;
+            top: calc(100% + 6px);
+            min-width: 132px;
+            background: #fff;
+            border: 1px solid #dbe3ef;
+            border-radius: 10px;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.12);
+            padding: 6px;
+            display: none;
+            z-index: 20;
+        }
+        .comment-menu.open { display: block; }
+        .comment-menu-item {
+            width: 100%;
+            border: none;
+            background: transparent;
+            color: #1e293b;
+            font-size: 0.8rem;
+            text-align: left;
+            border-radius: 8px;
+            padding: 7px 8px;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            cursor: pointer;
+        }
+        .comment-menu-item:hover { background: #f1f5f9; }
+        .comment-menu-item.danger { color: #b91c1c; }
+        .comment-menu-item svg { width: 14px; height: 14px; }
         .comment-name { font-size: 0.82rem; font-weight: 700; color: #0f172a; }
         .comment-text {
             margin-top: 3px; font-size: 0.84rem; color: #334155; line-height: 1.45;
             background: #f1f5f9; border-radius: 10px; padding: 8px 10px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            max-width: 100%;
+        }
+        .comment-item.own .comment-text {
+            background: #dbeafe;
+            color: #0f172a;
         }
         .comment-time { font-size: 0.7rem; color: #94a3b8; margin-top: 3px; text-align: right; }
         .comments-empty { padding: 20px; text-align: center; color: #94a3b8; font-size: 0.86rem; }
         .comment-compose {
             padding: 10px 14px; border-top: 1px solid #e2e8f0;
-            display: flex; gap: 8px; flex-shrink: 0;
+            display: flex; flex-direction: column; gap: 8px; flex-shrink: 0;
+        }
+        .comment-compose-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
         }
         .comment-input {
             flex: 1; border: 1px solid #cbd5e1; border-radius: 10px;
@@ -898,6 +1299,66 @@ if ($isViewMode) {
             outline: none; transition: border-color 0.15s;
         }
         .comment-input:focus { border-color: #93c5fd; }
+        .comment-attach-input { display: none; }
+        .comment-attach-btn {
+            width: 40px;
+            border: 1px solid #cbd5e1;
+            background: #fff;
+            color: #334155;
+            border-radius: 10px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .comment-attach-btn:hover { background: #f8fafc; border-color: #94a3b8; }
+        .comment-attach-btn svg { width: 18px; height: 18px; }
+        .comment-attachment {
+            margin-top: 6px;
+            padding: 6px 8px;
+            background: #e2e8f0;
+            border-radius: 8px;
+            font-size: 0.78rem;
+            color: #1e293b;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            max-width: 100%;
+        }
+        .comment-attachment a {
+            color: #1d4ed8;
+            text-decoration: none;
+            font-weight: 600;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 230px;
+        }
+        .comment-attachment a:hover { text-decoration: underline; }
+        .comment-attach-chip {
+            display: none;
+            align-items: center;
+            gap: 6px;
+            background: #e2e8f0;
+            color: #0f172a;
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 0.75rem;
+            white-space: nowrap;
+            max-width: 100%;
+            width: fit-content;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .comment-attach-remove {
+            border: none;
+            background: transparent;
+            color: #334155;
+            font-size: 15px;
+            line-height: 1;
+            cursor: pointer;
+            padding: 0;
+        }
         .comment-send-btn {
             border: none; background: #2563eb; color: #fff; border-radius: 10px;
             padding: 0 16px; font-size: 0.84rem; font-weight: 700; cursor: pointer;
@@ -1130,7 +1591,7 @@ if ($isViewMode) {
                             <div class="superadmin-note-label">Super Admin Note</div>
                             <div class="superadmin-note-text"><?php echo $superAdminNote !== '' ? nl2br(htmlspecialchars($superAdminNote)) : 'No note provided.'; ?></div>
                         </div>
-                        <div class="comments-list" id="detail-comments-list">
+                        <div class="comments-list" id="detail-comments-list" data-document-id="<?php echo htmlspecialchars($selectedDocumentId); ?>">
                             <?php if ($selectedDocument): ?>
                             <div class="comment-item">
                                 <div class="comment-avatar sa"><?php echo mb_strtoupper(mb_substr((string)($selectedDocument['sent_by_user_name'] ?? $userName ?? 'S'), 0, 1)); ?></div>
@@ -1142,15 +1603,75 @@ if ($isViewMode) {
                                     <div class="comment-time"><?php echo htmlspecialchars((string)($selectedDocument['sentAtFormatted'] ?? '')); ?></div>
                                 </div>
                             </div>
+                            <?php foreach ($documentComments as $comment): ?>
+                            <div class="comment-item<?php echo !empty($comment['can_edit']) ? ' own' : ''; ?>" data-comment-id="<?php echo htmlspecialchars((string)($comment['id'] ?? '')); ?>">
+                                <div class="comment-avatar <?php echo htmlspecialchars((string)($comment['avatar_class'] ?? 'dh')); ?>"><?php echo htmlspecialchars((string)($comment['avatar_letter'] ?? 'U')); ?></div>
+                                <div class="comment-body">
+                                    <div class="comment-meta">
+                                        <?php if (!empty($comment['can_edit'])): ?>
+                                        <div class="comment-menu-wrap">
+                                            <button type="button" class="comment-menu-btn" aria-label="Comment options" title="Comment options">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                    <circle cx="12" cy="5" r="1.8"></circle>
+                                                    <circle cx="12" cy="12" r="1.8"></circle>
+                                                    <circle cx="12" cy="19" r="1.8"></circle>
+                                                </svg>
+                                            </button>
+                                            <div class="comment-menu">
+                                                <button type="button" class="comment-menu-item" data-comment-action="edit">
+                                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                        <path d="M12 20h9"></path>
+                                                        <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path>
+                                                    </svg>
+                                                    Edit
+                                                </button>
+                                                <button type="button" class="comment-menu-item danger" data-comment-action="delete">
+                                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                        <polyline points="3 6 5 6 21 6"></polyline>
+                                                        <path d="M19 6l-1 14H6L5 6"></path>
+                                                        <path d="M10 11v6"></path>
+                                                        <path d="M14 11v6"></path>
+                                                        <path d="M9 6V4h6v2"></path>
+                                                    </svg>
+                                                    Delete
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <?php endif; ?>
+                                        <div class="comment-name"><?php echo htmlspecialchars((string)($comment['user_name'] ?? 'User')); ?></div>
+                                    </div>
+                                    <div class="comment-text"><?php echo nl2br(htmlspecialchars((string)($comment['text'] ?? ''))); ?></div>
+                                    <?php if (trim((string)($comment['attachment_data_url'] ?? '')) !== ''): ?>
+                                    <div class="comment-attachment">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21.44 11.05l-8.49 8.49a6 6 0 0 1-8.49-8.49l8.49-8.49a4 4 0 1 1 5.66 5.66l-8.49 8.49a2 2 0 0 1-2.83-2.83l7.78-7.78"/></svg>
+                                        <a href="<?php echo htmlspecialchars((string)($comment['attachment_data_url'] ?? '')); ?>" download="<?php echo htmlspecialchars((string)($comment['attachment_name'] ?? 'attachment')); ?>">
+                                            <?php echo htmlspecialchars((string)($comment['attachment_name'] ?? 'Attachment')); ?>
+                                        </a>
+                                    </div>
+                                    <?php endif; ?>
+                                    <div class="comment-time"><?php echo htmlspecialchars((string)($comment['time_label'] ?? '')); ?><?php echo !empty($comment['is_edited']) ? ' (edited)' : ''; ?></div>
+                                </div>
+                            </div>
+                            <?php endforeach; ?>
                             <?php else: ?>
                             <div class="comments-empty">No comments yet.</div>
                             <?php endif; ?>
                         </div>
                         <div class="comment-compose">
+                            <div class="comment-attach-chip" id="detail-comment-attach-chip">
+                                <span id="detail-comment-attach-name"></span>
+                                <button type="button" class="comment-attach-remove" id="detail-comment-attach-remove" aria-label="Remove attachment">&times;</button>
+                            </div>
+                            <div class="comment-compose-row">
                             <input type="text" class="comment-input" id="detail-comment-input" placeholder="Write a comment...">
+                            <input type="file" class="comment-attach-input" id="detail-comment-attach-input">
+                            <button type="button" class="comment-attach-btn" id="detail-comment-attach-btn" title="Attach file" aria-label="Attach file">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-8.49 8.49a6 6 0 0 1-8.49-8.49l8.49-8.49a4 4 0 1 1 5.66 5.66l-8.49 8.49a2 2 0 0 1-2.83-2.83l7.78-7.78"/></svg>
+                            </button>
                             <button type="button" class="comment-send-btn" id="detail-comment-send">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
                             </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1414,24 +1935,276 @@ if ($isViewMode) {
         document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeProgressPanel(); });
 
         var commentInput = document.getElementById('detail-comment-input');
+        var commentAttachInput = document.getElementById('detail-comment-attach-input');
+        var commentAttachBtn = document.getElementById('detail-comment-attach-btn');
+        var commentAttachChip = document.getElementById('detail-comment-attach-chip');
+        var commentAttachName = document.getElementById('detail-comment-attach-name');
+        var commentAttachRemove = document.getElementById('detail-comment-attach-remove');
         var commentSendBtn = document.getElementById('detail-comment-send');
         var commentsList = document.getElementById('detail-comments-list');
         if (commentInput && commentSendBtn && commentsList) {
+            var commentDocId = commentsList.getAttribute('data-document-id') || '';
+            var currentUserName = <?php echo json_encode($userName); ?> || 'User';
+            var currentUserInitial = <?php echo json_encode(mb_strtoupper(mb_substr($userName, 0, 1))); ?> || 'U';
+            var pendingAttachment = null;
+            var MAX_ATTACH_BYTES = 2 * 1024 * 1024;
+
+            function closeAllCommentMenus() {
+                commentsList.querySelectorAll('.comment-menu.open').forEach(function(menu) {
+                    menu.classList.remove('open');
+                });
+                commentsList.querySelectorAll('.comment-item.menu-open').forEach(function(item) {
+                    item.classList.remove('menu-open');
+                });
+            }
+
+            function menuHtml() {
+                return (
+                    '<div class="comment-menu-wrap">' +
+                        '<button type="button" class="comment-menu-btn" aria-label="Comment options" title="Comment options">' +
+                            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+                                '<circle cx="12" cy="5" r="1.8"></circle>' +
+                                '<circle cx="12" cy="12" r="1.8"></circle>' +
+                                '<circle cx="12" cy="19" r="1.8"></circle>' +
+                            '</svg>' +
+                        '</button>' +
+                        '<div class="comment-menu">' +
+                            '<button type="button" class="comment-menu-item" data-comment-action="edit">' +
+                                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+                                    '<path d="M12 20h9"></path>' +
+                                    '<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path>' +
+                                '</svg>' +
+                                'Edit' +
+                            '</button>' +
+                            '<button type="button" class="comment-menu-item danger" data-comment-action="delete">' +
+                                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+                                    '<polyline points="3 6 5 6 21 6"></polyline>' +
+                                    '<path d="M19 6l-1 14H6L5 6"></path>' +
+                                    '<path d="M10 11v6"></path>' +
+                                    '<path d="M14 11v6"></path>' +
+                                    '<path d="M9 6V4h6v2"></path>' +
+                                '</svg>' +
+                                'Delete' +
+                            '</button>' +
+                        '</div>' +
+                    '</div>'
+                );
+            }
+
+            function renderMyComment(comment) {
+                var item = document.createElement('div');
+                item.className = 'comment-item own';
+                item.setAttribute('data-comment-id', comment.id || '');
+                item.innerHTML =
+                    '<div class="comment-avatar sa">' + currentUserInitial + '</div>' +
+                    '<div class="comment-body">' +
+                        '<div class="comment-meta">' +
+                            menuHtml() +
+                            '<div class="comment-name">' + currentUserName + '</div>' +
+                        '</div>' +
+                        '<div class="comment-text"></div>' +
+                        '<div class="comment-time"></div>' +
+                    '</div>';
+                var textEl = item.querySelector('.comment-text');
+                if (textEl) textEl.textContent = comment.text || '';
+                var timeEl = item.querySelector('.comment-time');
+                if (timeEl) {
+                    var suffix = comment.is_edited ? ' (edited)' : '';
+                    timeEl.textContent = (comment.time_label || '') + suffix;
+                }
+                var attachmentDataUrl = (comment && comment.attachment_data_url) ? String(comment.attachment_data_url) : '';
+                var attachmentName = (comment && comment.attachment_name) ? String(comment.attachment_name) : 'Attachment';
+                if (attachmentDataUrl) {
+                    var attachmentEl = document.createElement('div');
+                    attachmentEl.className = 'comment-attachment';
+                    attachmentEl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21.44 11.05l-8.49 8.49a6 6 0 0 1-8.49-8.49l8.49-8.49a4 4 0 1 1 5.66 5.66l-8.49 8.49a2 2 0 0 1-2.83-2.83l7.78-7.78"/></svg>';
+                    var a = document.createElement('a');
+                    a.href = attachmentDataUrl;
+                    a.download = attachmentName;
+                    a.textContent = attachmentName;
+                    attachmentEl.appendChild(a);
+                    var body = item.querySelector('.comment-body');
+                    var timeNode = item.querySelector('.comment-time');
+                    if (body && timeNode) body.insertBefore(attachmentEl, timeNode);
+                }
+                return item;
+            }
+
+            function clearPendingAttachment() {
+                pendingAttachment = null;
+                if (commentAttachInput) commentAttachInput.value = '';
+                if (commentAttachChip) commentAttachChip.style.display = 'none';
+                if (commentAttachName) commentAttachName.textContent = '';
+            }
+
+            function setPendingAttachment(file, dataUrl) {
+                pendingAttachment = {
+                    name: file && file.name ? file.name : 'attachment',
+                    type: file && file.type ? file.type : 'application/octet-stream',
+                    size: file && typeof file.size === 'number' ? file.size : 0,
+                    data_url: dataUrl || ''
+                };
+                if (commentAttachName) commentAttachName.textContent = pendingAttachment.name;
+                if (commentAttachChip) commentAttachChip.style.display = 'inline-flex';
+            }
+
+            function postCommentAction(payload) {
+                var body = new URLSearchParams(payload);
+                body.set('ajax', '1');
+                return fetch('documents.php', {
+                    method: 'POST',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                    body: body.toString()
+                }).then(function(resp) { return resp.json(); });
+            }
+
+            commentsList.addEventListener('click', function(e) {
+                var menuBtn = e.target.closest('.comment-menu-btn');
+                if (menuBtn) {
+                    e.preventDefault();
+                    var item = menuBtn.closest('.comment-item');
+                    var wrap = menuBtn.closest('.comment-menu-wrap');
+                    var menu = wrap ? wrap.querySelector('.comment-menu') : null;
+                    if (!menu) return;
+                    var willOpen = !menu.classList.contains('open');
+                    closeAllCommentMenus();
+                    if (willOpen) {
+                        menu.classList.add('open');
+                        if (item) item.classList.add('menu-open');
+                    }
+                    return;
+                }
+
+                var actionBtn = e.target.closest('[data-comment-action]');
+                if (!actionBtn) return;
+                e.preventDefault();
+                var action = actionBtn.getAttribute('data-comment-action') || '';
+                var commentItem = actionBtn.closest('.comment-item');
+                var textEl = commentItem ? commentItem.querySelector('.comment-text') : null;
+                var commentId = commentItem ? (commentItem.getAttribute('data-comment-id') || '') : '';
+                closeAllCommentMenus();
+                if (!commentItem || !textEl || !commentId || !commentDocId) return;
+
+                if (action === 'edit') {
+                    var oldText = (textEl.textContent || '').trim();
+                    var nextText = window.prompt('Update comment:', oldText);
+                    if (nextText === null) return;
+                    nextText = nextText.trim();
+                    if (!nextText || nextText === oldText) return;
+                    postCommentAction({
+                        action: 'edit_document_comment',
+                        document_id: commentDocId,
+                        comment_id: commentId,
+                        comment_text: nextText
+                    }).then(function(res) {
+                        if (!res || !res.ok || !res.comment) {
+                            throw new Error((res && res.error) ? res.error : 'Could not update comment.');
+                        }
+                        textEl.textContent = res.comment.text || nextText;
+                        var timeEl = commentItem.querySelector('.comment-time');
+                        if (timeEl) timeEl.textContent = (res.comment.time_label || '') + (res.comment.is_edited ? ' (edited)' : '');
+                    }).catch(function(err) {
+                        window.alert(err.message || 'Could not update comment.');
+                    });
+                    return;
+                }
+
+                if (action === 'delete') {
+                    if (!window.confirm('Delete this comment?')) return;
+                    postCommentAction({
+                        action: 'delete_document_comment',
+                        document_id: commentDocId,
+                        comment_id: commentId
+                    }).then(function(res) {
+                        if (!res || !res.ok) {
+                            throw new Error((res && res.error) ? res.error : 'Could not delete comment.');
+                        }
+                        commentItem.remove();
+                    }).catch(function(err) {
+                        window.alert(err.message || 'Could not delete comment.');
+                    });
+                }
+            });
+
+            document.addEventListener('click', function(e) {
+                if (!e.target.closest('.comment-menu-wrap')) {
+                    closeAllCommentMenus();
+                }
+            });
+
+            if (commentAttachBtn && commentAttachInput) {
+                commentAttachBtn.addEventListener('click', function() {
+                    commentAttachInput.click();
+                });
+                commentAttachInput.addEventListener('change', function() {
+                    var file = commentAttachInput.files && commentAttachInput.files[0] ? commentAttachInput.files[0] : null;
+                    if (!file) {
+                        clearPendingAttachment();
+                        return;
+                    }
+                    if (file.size > MAX_ATTACH_BYTES) {
+                        window.alert('Attachment must be 2MB or below.');
+                        clearPendingAttachment();
+                        return;
+                    }
+                    var reader = new FileReader();
+                    reader.onload = function() {
+                        var dataUrl = typeof reader.result === 'string' ? reader.result : '';
+                        if (!dataUrl) {
+                            window.alert('Could not read selected file.');
+                            clearPendingAttachment();
+                            return;
+                        }
+                        setPendingAttachment(file, dataUrl);
+                    };
+                    reader.onerror = function() {
+                        window.alert('Could not read selected file.');
+                        clearPendingAttachment();
+                    };
+                    reader.readAsDataURL(file);
+                });
+            }
+            if (commentAttachRemove) {
+                commentAttachRemove.addEventListener('click', function() {
+                    clearPendingAttachment();
+                });
+            }
+
             function addComment() {
                 var txt = (commentInput.value || '').trim();
-                if (!txt) return;
-                var now = new Date();
-                var ts = now.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
-                var item = document.createElement('div');
-                item.className = 'comment-item';
-                item.innerHTML = '<div class="comment-avatar sa"><?php echo mb_strtoupper(mb_substr($userName, 0, 1)); ?></div><div class="comment-body"><div class="comment-name"><?php echo htmlspecialchars($userName); ?></div><div class="comment-text"></div><div class="comment-time">' + ts + '</div></div>';
-                item.querySelector('.comment-text').textContent = txt;
-                commentsList.appendChild(item);
-                commentsList.scrollTop = commentsList.scrollHeight;
-                commentInput.value = '';
+                if ((!txt && !pendingAttachment) || !commentDocId) return;
+                var payload = {
+                    action: 'add_document_comment',
+                    document_id: commentDocId,
+                    comment_text: txt
+                };
+                if (pendingAttachment) {
+                    payload.comment_attachment_name = pendingAttachment.name || '';
+                    payload.comment_attachment_type = pendingAttachment.type || '';
+                    payload.comment_attachment_size = String(pendingAttachment.size || 0);
+                    payload.comment_attachment_data_url = pendingAttachment.data_url || '';
+                }
+                postCommentAction(payload).then(function(res) {
+                    if (!res || !res.ok || !res.comment) {
+                        throw new Error((res && res.error) ? res.error : 'Could not add comment.');
+                    }
+                    var item = renderMyComment(res.comment);
+                    commentsList.appendChild(item);
+                    commentsList.scrollTop = commentsList.scrollHeight;
+                    commentInput.value = '';
+                    clearPendingAttachment();
+                }).catch(function(err) {
+                    window.alert(err.message || 'Could not add comment.');
+                });
             }
+
             commentSendBtn.addEventListener('click', addComment);
-            commentInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); addComment(); } });
+            commentInput.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addComment();
+                }
+            });
         }
 
         document.querySelectorAll('.detail-send-admin-trigger').forEach(function(btn) {

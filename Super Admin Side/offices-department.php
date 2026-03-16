@@ -17,6 +17,7 @@ $sidebar_active = 'offices';
 // Load config
 $config = require dirname(__DIR__) . '/config.php';
 require_once dirname(__DIR__) . '/db.php';
+require_once __DIR__ . '/_activity_logger.php';
 require_once __DIR__ . '/_account_helpers.php';
 require_once __DIR__ . '/_notifications_super_admin.php';
 $notifData = getSuperAdminNotifications($config);
@@ -448,6 +449,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_POST['office_head'] ?? '',
             $_POST['description'] ?? ''
         );
+        if (!empty($flash['success'])) {
+            activityLog($config, 'office_add', [
+                'module' => 'super_admin_offices',
+                'office_name' => trim((string)($_POST['office_name'] ?? '')),
+                'office_code' => trim((string)($_POST['office_code'] ?? '')),
+            ]);
+        }
     } elseif ($action === 'update' && !empty($_POST['office_id'])) {
         $flash = updateOffice(
             $_POST['office_id'],
@@ -456,10 +464,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_POST['office_head'] ?? '',
             $_POST['description'] ?? ''
         );
+        if (!empty($flash['success'])) {
+            activityLog($config, 'office_update', [
+                'module' => 'super_admin_offices',
+                'office_id' => trim((string)($_POST['office_id'] ?? '')),
+                'office_name' => trim((string)($_POST['office_name'] ?? '')),
+                'office_code' => trim((string)($_POST['office_code'] ?? '')),
+            ]);
+        }
     } elseif ($action === 'assign_head' && !empty($_POST['office_id'])) {
         $flash = assignHead($_POST['office_id'], $_POST['office_head_id'] ?? '');
+        if (!empty($flash['success'])) {
+            activityLog($config, 'office_assign_head', [
+                'module' => 'super_admin_offices',
+                'office_id' => trim((string)($_POST['office_id'] ?? '')),
+                'office_head_id' => trim((string)($_POST['office_head_id'] ?? '')),
+            ]);
+        }
     } elseif ($action === 'delete' && !empty($_POST['office_id'])) {
         $flash = deleteOffice($_POST['office_id']);
+        if (!empty($flash['success'])) {
+            activityLog($config, 'office_delete', [
+                'module' => 'super_admin_offices',
+                'office_id' => trim((string)($_POST['office_id'] ?? '')),
+            ]);
+        }
     } elseif ($action === 'change_password' && !empty($_SESSION['user_id'])) {
         $flash = changePassword(
             $_SESSION['user_id'],
@@ -550,6 +579,9 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .profile-link:hover { background: #f1f5f9; }
         .settings-modal-overlay { position: fixed; inset: 0; background: rgba(27, 21, 72, 0.5); z-index: 2000; display: none; align-items: center; justify-content: center; padding: 1rem; overflow-y: auto; }
         .settings-modal-overlay.settings-modal-open { display: flex; }
+        /* Keep profile photo viewer hidden by default; only show when explicitly opened. */
+        .profile-photo-view-overlay { display: none !important; }
+        .profile-photo-view-overlay.profile-photo-view-open[aria-hidden="false"] { display: flex !important; }
         .profile-photo-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
         .profile-photo-card h3 { margin: 0 0 0.25rem 0; font-size: 1.1rem; font-weight: 700; color: #1e293b; }
         .profile-photo-card .profile-info-desc { margin: 0 0 1rem 0; font-size: 0.9rem; color: #64748b; }
@@ -611,7 +643,7 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .delete-confirm-btn-delete { padding: 10px 20px; border: none; background: #dc2626; color: #fff; border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
         .delete-confirm-btn-delete:hover { background: #b91c1c; color: #fff; }
         .main-content {
-            background: #f1f5f9;
+            background: #fff;
             /* Keep sticky header working even with shared sidebar styles. */
             overflow: visible !important;
         }
@@ -628,20 +660,19 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .dept-page-title-icon svg { width: 19px; height: 19px; }
         .dept-page-title { margin: 0; font-size: 1.6rem; font-weight: 700; color: #1e293b; }
         .dept-page-subtitle { margin: 0.25rem 0 0 0; font-size: 0.95rem; color: #64748b; }
-        .dept-add-btn { display: inline-flex; align-items: center; gap: 8px; padding: 0.6rem 1.25rem; background: #1A202C; color: #fff; border: none; border-radius: 10px; font-size: 0.95rem; font-weight: 600; cursor: pointer; text-decoration: none; transition: background 0.15s; }
-        .dept-add-btn:hover { background: #2d3748; color: #fff; }
+        .dept-add-btn { display: inline-flex; align-items: center; gap: 8px; padding: 0.6rem 1.25rem; background: #2563eb; color: #fff; border: none; border-radius: 10px; font-size: 0.95rem; font-weight: 600; cursor: pointer; text-decoration: none; transition: background 0.15s; }
+        .dept-add-btn:hover { background: #1d4ed8; color: #fff; }
         .dept-add-btn svg { width: 20px; height: 20px; flex-shrink: 0; }
-        .dept-search-row { display: flex; align-items: stretch; gap: 0; margin-bottom: 1.5rem; max-width: 100%; border-radius: 10px; overflow: hidden; border: 1px solid #e2e8f0; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+        .dept-search-row { display: flex; align-items: stretch; gap: 10px; margin-bottom: 1.25rem; max-width: 100%; }
         .dept-search-wrap { flex: 1; position: relative; min-width: 0; display: flex; align-items: center; }
         .dept-search-wrap svg { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); width: 20px; height: 20px; color: #94a3b8; pointer-events: none; flex-shrink: 0; }
-        .dept-search { width: 100%; height: 44px; padding: 0 16px 0 44px; border: none; border-radius: 0; font-size: 0.95rem; color: #1e293b; background: transparent; outline: none; }
+        .dept-search { width: 100%; height: 42px; padding: 0 16px 0 44px; border: 1px solid #e2e8f0; border-radius: 10px; font-size: 0.95rem; color: #1e293b; background: #fff; outline: none; }
         .dept-search::placeholder { color: #94a3b8; }
-        .dept-search:focus { outline: none; }
-        .dept-search-row:focus-within { border-color: #3B82F6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15); }
-        .dept-filter-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 44px; padding: 0 20px; border: none; border-left: 1px solid rgba(255,255,255,0.08); border-radius: 0; background: #1A202C; color: #fff; font-size: 0.95rem; font-weight: 600; cursor: pointer; outline: none; transition: background 0.15s, color 0.15s; flex-shrink: 0; font-family: inherit; -webkit-appearance: none; appearance: none; }
-        .dept-filter-btn:hover { background: #2d3748; color: #fff; border-left-color: rgba(255,255,255,0.08); }
+        .dept-search:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14); }
+        .dept-filter-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 42px; padding: 0 18px; border: none; border-radius: 10px; background: #64748b; color: #fff; font-size: 0.9rem; font-weight: 600; cursor: pointer; outline: none; transition: background 0.15s, color 0.15s; flex-shrink: 0; font-family: inherit; -webkit-appearance: none; appearance: none; }
+        .dept-filter-btn:hover { background: #475569; color: #fff; }
         .dept-filter-btn:focus { outline: none; }
-        .dept-filter-btn:focus-visible { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.3); }
+        .dept-filter-btn:focus-visible { box-shadow: 0 0 0 3px rgba(100, 116, 139, 0.2); }
         .dept-filter-btn svg { width: 18px; height: 18px; flex-shrink: 0; }
         .dept-cards-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; align-items: stretch; }
         .dept-card { background: #fff; border-radius: 0.75rem; border: 1px solid #e5e7eb; box-shadow: 0 1px 3px rgba(0,0,0,0.08); transition: box-shadow 0.2s ease; min-height: 320px; display: flex; flex-direction: column; overflow: hidden; }
@@ -685,11 +716,17 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .dept-toast-icon svg { width: 14px; height: 14px; }
         .dept-toast-text { flex: 1; font-size: 0.95rem; font-weight: 500; }
         @keyframes dept-toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        .offices-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 200; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+        .offices-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 1300; display: flex; align-items: center; justify-content: center; padding: 1rem; }
         .offices-modal-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.4); cursor: pointer; }
         .offices-modal-content { position: relative; background: #fff; padding: 1.5rem 1.75rem; border-radius: 12px; width: 100%; max-width: 440px; box-shadow: 0 20px 40px rgba(0,0,0,0.15); }
         .offices-modal-content h3 { margin: 0 0 0.25rem 0; font-size: 1.35rem; font-weight: 700; color: #1e293b; }
         .offices-modal-subtitle { margin: 0 0 1.25rem 0; font-size: 0.9rem; color: #64748b; }
+        /* Keep Add Department modal header area same as body color */
+        #modal-add .offices-modal-content,
+        #modal-add .offices-modal-content h3,
+        #modal-add .offices-modal-content .offices-modal-subtitle {
+            background: #fff !important;
+        }
         .offices-modal-close { position: absolute; top: 1rem; right: 1rem; width: 32px; height: 32px; border: none; background: transparent; color: #64748b; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
         .offices-modal-close:hover { background: #f1f5f9; color: #1e293b; }
         .offices-modal-close svg { width: 20px; height: 20px; }
@@ -794,8 +831,8 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
             .dept-header-actions { gap: 8px; }
             .dept-content-actions { justify-content: flex-end; }
             .dept-add-btn { width: auto; justify-content: center; min-width: 0; padding: 0 0.85rem; height: 38px; font-size: 0.86rem; }
-            .dept-search-row { flex-direction: row; border-radius: 10px; overflow: hidden; }
-            .dept-filter-btn { width: auto; border-left: 1px solid rgba(255,255,255,0.08); border-top: none; border-radius: 0; justify-content: center; padding: 0 14px; font-size: 0.9rem; }
+            .dept-search-row { flex-direction: row; border-radius: 10px; overflow: visible; }
+            .dept-filter-btn { width: auto; border-top: none; border-radius: 10px; justify-content: center; padding: 0 14px; font-size: 0.9rem; }
             .dept-search { height: 42px; }
             .dept-filter-btn { height: 42px; }
         }
@@ -1137,8 +1174,12 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                 }
                 applyLiveFilter();
             })();
-            function openAddModal() { document.getElementById('modal-add').style.display = 'flex'; }
-            function closeAddModal() { document.getElementById('modal-add').style.display = 'none'; }
+            function openAddModal() {
+                document.getElementById('modal-add').style.display = 'flex';
+            }
+            function closeAddModal() {
+                document.getElementById('modal-add').style.display = 'none';
+            }
             function openViewModalFromCard(card) {
                 var d = card.dataset || {};
                 window.__activeViewOfficeId = d.officeId || '';

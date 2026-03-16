@@ -395,9 +395,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_SESSION['add_user_otp_email'] = strtolower($email);
         $_SESSION['add_user_otp_expires_at'] = time() + ($expiryMinutes * 60);
         $_SESSION['add_user_otp_resend_at'] = time() + 30;
-        if (!sendAddUserOtpEmail($email, $otp, $config, $name)) {
+        $mailError = '';
+        if (!sendEmailViaSmtp(
+            $email,
+            'DMS LGU Solano - Add User OTP Code',
+            "Good day, " . (trim($name) !== '' ? trim($name) : 'User') . ".\n\n"
+                . "A request was made to add a user account in DMS LGU Solano.\n"
+                . "Your one-time verification code is: {$otp}\n\n"
+                . "This code expires in {$expiryMinutes} minute(s).\n"
+                . "If you did not request this, please ignore this message.\n\n"
+                . "Regards,\nDMS LGU Solano",
+            $config,
+            '',
+            $mailError
+        )) {
+            error_log('Add user OTP send failed: ' . (string)$mailError);
             http_response_code(500);
-            echo json_encode(['success' => false, 'message' => 'Failed to send OTP. Please try again.']);
+            $safeReason = trim((string)$mailError) !== '' ? trim((string)$mailError) : 'Unknown SMTP error.';
+            echo json_encode(['success' => false, 'message' => 'Failed to send OTP. ' . $safeReason]);
             exit;
         }
         echo json_encode(['success' => true, 'message' => 'OTP has been sent to the provided Gmail/email.']);
@@ -466,9 +481,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_SESSION['edit_user_change_otp_new_email'] = $targetEmail;
         $_SESSION['edit_user_change_otp_expires_at'] = time() + ($expiryMinutes * 60);
         $_SESSION['edit_user_change_otp_resend_at'] = time() + 15;
-        if (!sendEditUserChangeOtpEmail($currentEmail, $otp, $config, $name)) {
+        $mailError = '';
+        if (!sendEmailViaSmtp(
+            $currentEmail,
+            'DMS LGU Solano - Edit User OTP Code',
+            "Good day, " . (trim($name) !== '' ? trim($name) : 'User') . ".\n\n"
+                . "A request was made to edit user information in DMS LGU Solano.\n"
+                . "Your one-time verification code is: {$otp}\n\n"
+                . "This code expires in {$expiryMinutes} minute(s).\n"
+                . "If you did not request this, please ignore this message.\n\n"
+                . "Regards,\nDMS LGU Solano",
+            $config,
+            '',
+            $mailError
+        )) {
+            error_log('Edit user OTP send failed: ' . (string)$mailError);
             http_response_code(500);
-            echo json_encode(['success' => false, 'message' => 'Failed to send OTP. Please try again.']);
+            $safeReason = trim((string)$mailError) !== '' ? trim((string)$mailError) : 'Unknown SMTP error.';
+            echo json_encode(['success' => false, 'message' => 'Failed to send OTP. ' . $safeReason]);
             exit;
         }
         echo json_encode(['success' => true, 'message' => 'OTP sent to old Gmail/email for confirmation.']);
@@ -2248,9 +2278,16 @@ function getUserAccountStatusMeta($u) {
                     body: fd,
                     credentials: 'same-origin'
                 }).then(function(resp) {
-                    return resp.json().then(function(data) {
-                        if (!resp.ok || !data.success) {
-                            throw new Error((data && data.message) ? data.message : 'Failed to send OTP.');
+                    return resp.text().then(function(raw) {
+                        var data = null;
+                        try {
+                            data = raw ? JSON.parse(raw) : null;
+                        } catch (e) {
+                            data = null;
+                        }
+                        if (!resp.ok || !data || !data.success) {
+                            var msg = (data && data.message) ? data.message : ('Failed to send OTP (HTTP ' + resp.status + ').');
+                            throw new Error(msg);
                         }
                         return data;
                     });

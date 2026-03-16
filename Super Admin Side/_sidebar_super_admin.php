@@ -7,7 +7,11 @@
 $sidebarDisplayName = trim((string)($_SESSION['user_name'] ?? $userName ?? $_SESSION['user_email'] ?? 'User'));
 if ($sidebarDisplayName === '') $sidebarDisplayName = 'User';
 ?>
-<div class="sidebar">
+<button type="button" class="sidebar-toggle-btn" id="sidebar-toggle-btn" aria-label="Toggle navigation menu" aria-controls="sidebar-super-admin" aria-expanded="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+</button>
+<div class="sidebar-mobile-overlay" id="sidebar-mobile-overlay" hidden></div>
+<div class="sidebar" id="sidebar-super-admin">
     <div class="sidebar-header">
         <div class="sidebar-logo">
             <img src="../img/logo.png" alt="LGU Solano">
