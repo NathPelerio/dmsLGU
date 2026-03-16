@@ -132,15 +132,36 @@ function ensureUserSuspensionMonotonicColumn($config) {
 }
 
 /**
+ * Normalize email input for add-user flows.
+ * Allows plain Gmail username (e.g. "sunga123") and converts it to "sunga123@gmail.com".
+ */
+function normalizeAddUserEmail($rawEmail) {
+    $value = strtolower(trim((string)$rawEmail));
+    if ($value === '') {
+        return '';
+    }
+    if (strpos($value, '@') === false) {
+        if (!preg_match('/^[a-z0-9._%+\-]+$/i', $value)) {
+            return '';
+        }
+        return $value . '@gmail.com';
+    }
+    return $value;
+}
+
+/**
  * Add a new user to the database.
  * @return array ['success' => bool, 'message' => string]
  */
 function addUser($config, $username, $name, $email, $password, $role) {
     $username = trim($username);
     $name = trim($name);
-    $email = trim($email);
+    $email = normalizeAddUserEmail($email);
     if ($username === '' || $email === '') {
         return ['success' => false, 'message' => 'Username and email are required.'];
+    }
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        return ['success' => false, 'message' => 'Enter a valid Gmail/email address.'];
     }
     if (!preg_match('/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/', $password)) {
         return ['success' => false, 'message' => 'Password must be at least 8 characters and include uppercase, lowercase, number, and special character.'];
@@ -367,11 +388,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
     if ($action === 'send_add_user_otp') {
         header('Content-Type: application/json');
-        $email = trim((string)($_POST['email'] ?? ''));
+        $email = normalizeAddUserEmail($_POST['email'] ?? '');
         $name = trim((string)($_POST['name'] ?? $_POST['username'] ?? ''));
         if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
             http_response_code(422);
-            echo json_encode(['success' => false, 'message' => 'Enter a valid Gmail/email address first.']);
+            echo json_encode(['success' => false, 'message' => 'Enter a valid Gmail/email first. You may type only the Gmail username (before @gmail.com).']);
             exit;
         }
         $nextResendAt = (int)($_SESSION['add_user_otp_resend_at'] ?? 0);
@@ -558,8 +579,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $otpHash = (string)($_SESSION['add_user_otp_code_hash'] ?? '');
         $otpEmail = (string)($_SESSION['add_user_otp_email'] ?? '');
         $otpExpiresAt = (int)($_SESSION['add_user_otp_expires_at'] ?? 0);
-        $formEmail = strtolower(trim((string)($_POST['email'] ?? '')));
+        $formEmail = normalizeAddUserEmail($_POST['email'] ?? '');
+        $_POST['email'] = $formEmail;
 
+        if ($formEmail === '' || !filter_var($formEmail, FILTER_VALIDATE_EMAIL)) {
+            $addUserError = 'Enter a valid Gmail/email address first.';
+            $addUserInvalidField = '';
+        }
         if ($otpInput === '') {
             $addUserError = 'OTP is required. Please click Send OTP first.';
             $addUserInvalidField = 'otp';
@@ -590,7 +616,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $config,
                 $_POST['username'] ?? '',
                 $_POST['name'] ?? '',
-                $_POST['email'] ?? '',
+                $formEmail,
                 $rawPassword,
                 $_POST['role'] ?? 'user'
             );
@@ -601,7 +627,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'module' => 'super_admin_users',
                         'target_name' => trim((string)($_POST['name'] ?? $_POST['username'] ?? $_POST['email'] ?? '')),
                         'target_username' => trim((string)($_POST['username'] ?? '')),
-                        'target_email' => trim((string)($_POST['email'] ?? '')),
+                        'target_email' => $formEmail,
                         'target_role' => trim((string)($_POST['role'] ?? 'user')),
                     ]);
                 } else {
@@ -1670,7 +1696,7 @@ function getUserAccountStatusMeta($u) {
                 </div>
                 <div class="doc-form-field">
                     <label for="add-user-email">Email <span class="required">*</span></label>
-                    <input type="email" id="add-user-email" name="email" placeholder="e.g. lgusolano@gmail.com" required>
+                    <input type="text" id="add-user-email" name="email" placeholder="e.g. sunga123 or sunga123@gmail.com" required autocomplete="email" inputmode="email">
                 </div>
                 <div class="doc-form-field">
                     <label for="add-user-role">Role</label>
@@ -2071,6 +2097,15 @@ function getUserAccountStatusMeta($u) {
         function isStrongPassword(value) {
             return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(value || '');
         }
+        function normalizeAddUserEmailInput(rawValue) {
+            var value = (rawValue || '').trim().toLowerCase();
+            if (!value) return '';
+            if (value.indexOf('@') === -1) {
+                if (!/^[a-z0-9._%+\-]+$/i.test(value)) return '';
+                return value + '@gmail.com';
+            }
+            return value;
+        }
         function saveAddUserDraft() {
             if (!form || !window.sessionStorage) return;
             var draft = {};
@@ -2259,11 +2294,12 @@ function getUserAccountStatusMeta($u) {
         if (sendOtpBtn) {
             sendOtpBtn.addEventListener('click', function() {
                 if (!emailEl) return;
-                var emailValue = (emailEl.value || '').trim();
+                var emailValue = normalizeAddUserEmailInput(emailEl.value);
                 if (!emailValue) {
-                    showOtpStatus('Enter the Gmail/email first.', false);
+                    showOtpStatus('Enter a valid Gmail/email first. You may type only the Gmail username.', false);
                     return;
                 }
+                emailEl.value = emailValue;
                 sendOtpBtn.disabled = true;
                 var originalText = sendOtpBtn.textContent;
                 sendOtpBtn.textContent = 'Sending...';
@@ -2316,6 +2352,16 @@ function getUserAccountStatusMeta($u) {
         if (form) {
             form.addEventListener('submit', function(e) {
                 saveAddUserDraft();
+                if (emailEl) {
+                    var normalizedEmail = normalizeAddUserEmailInput(emailEl.value);
+                    if (!normalizedEmail) {
+                        e.preventDefault();
+                        showOtpStatus('Enter a valid Gmail/email first. You may type only the Gmail username.', false);
+                        showError('Enter a valid Gmail/email address first.');
+                        return;
+                    }
+                    emailEl.value = normalizedEmail;
+                }
                 if (!pwd || !confirmPwd) { return; }
                 if (!isStrongPassword(pwd.value)) {
                     e.preventDefault();
