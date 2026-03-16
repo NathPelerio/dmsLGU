@@ -1193,8 +1193,12 @@ if ($isViewMode) {
         .comments-list {
             flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px;
             display: flex; flex-direction: column; gap: 10px;
+            overflow-x: hidden;
         }
-        .comment-item { display: flex; gap: 10px; align-items: flex-start; }
+        .comment-item { display: flex; gap: 10px; align-items: flex-start; width: 100%; justify-content: flex-start; }
+        .comment-item.own { justify-content: flex-end; }
+        .comment-item.own .comment-avatar { order: 2; }
+        .comment-item.own .comment-body { order: 1; }
         .comment-avatar {
             width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
             display: flex; align-items: center; justify-content: center;
@@ -1202,8 +1206,11 @@ if ($isViewMode) {
         }
         .comment-avatar.sa { background: #1e40af; }
         .comment-avatar.dh { background: #0f766e; }
-        .comment-body { flex: 1; min-width: 0; }
+        .comment-body { flex: 0 1 auto; min-width: 0; max-width: min(70%, 320px); }
+        .comment-item:not(.own) .comment-body { margin-right: auto; }
+        .comment-item.own .comment-body { margin-left: auto; }
         .comment-meta { display: flex; align-items: center; gap: 8px; }
+        .comment-item.own .comment-meta { justify-content: flex-end; }
         .comment-menu-wrap {
             position: relative;
             opacity: 0;
@@ -1266,12 +1273,25 @@ if ($isViewMode) {
         .comment-text {
             margin-top: 3px; font-size: 0.84rem; color: #334155; line-height: 1.45;
             background: #f1f5f9; border-radius: 10px; padding: 8px 10px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            max-width: 100%;
+        }
+        .comment-item.own .comment-text {
+            background: #dbeafe;
+            color: #0f172a;
         }
         .comment-time { font-size: 0.7rem; color: #94a3b8; margin-top: 3px; text-align: right; }
         .comments-empty { padding: 20px; text-align: center; color: #94a3b8; font-size: 0.86rem; }
         .comment-compose {
             padding: 10px 14px; border-top: 1px solid #e2e8f0;
-            display: flex; gap: 8px; flex-shrink: 0;
+            display: flex; flex-direction: column; gap: 8px; flex-shrink: 0;
+        }
+        .comment-compose-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
         }
         .comment-input {
             flex: 1; border: 1px solid #cbd5e1; border-radius: 10px;
@@ -1325,7 +1345,8 @@ if ($isViewMode) {
             padding: 4px 10px;
             font-size: 0.75rem;
             white-space: nowrap;
-            max-width: 190px;
+            max-width: 100%;
+            width: fit-content;
             overflow: hidden;
             text-overflow: ellipsis;
         }
@@ -1583,7 +1604,7 @@ if ($isViewMode) {
                                 </div>
                             </div>
                             <?php foreach ($documentComments as $comment): ?>
-                            <div class="comment-item" data-comment-id="<?php echo htmlspecialchars((string)($comment['id'] ?? '')); ?>">
+                            <div class="comment-item<?php echo !empty($comment['can_edit']) ? ' own' : ''; ?>" data-comment-id="<?php echo htmlspecialchars((string)($comment['id'] ?? '')); ?>">
                                 <div class="comment-avatar <?php echo htmlspecialchars((string)($comment['avatar_class'] ?? 'dh')); ?>"><?php echo htmlspecialchars((string)($comment['avatar_letter'] ?? 'U')); ?></div>
                                 <div class="comment-body">
                                     <div class="comment-meta">
@@ -1637,18 +1658,20 @@ if ($isViewMode) {
                             <?php endif; ?>
                         </div>
                         <div class="comment-compose">
+                            <div class="comment-attach-chip" id="detail-comment-attach-chip">
+                                <span id="detail-comment-attach-name"></span>
+                                <button type="button" class="comment-attach-remove" id="detail-comment-attach-remove" aria-label="Remove attachment">&times;</button>
+                            </div>
+                            <div class="comment-compose-row">
                             <input type="text" class="comment-input" id="detail-comment-input" placeholder="Write a comment...">
                             <input type="file" class="comment-attach-input" id="detail-comment-attach-input">
                             <button type="button" class="comment-attach-btn" id="detail-comment-attach-btn" title="Attach file" aria-label="Attach file">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-8.49 8.49a6 6 0 0 1-8.49-8.49l8.49-8.49a4 4 0 1 1 5.66 5.66l-8.49 8.49a2 2 0 0 1-2.83-2.83l7.78-7.78"/></svg>
                             </button>
-                            <div class="comment-attach-chip" id="detail-comment-attach-chip">
-                                <span id="detail-comment-attach-name"></span>
-                                <button type="button" class="comment-attach-remove" id="detail-comment-attach-remove" aria-label="Remove attachment">&times;</button>
-                            </div>
                             <button type="button" class="comment-send-btn" id="detail-comment-send">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
                             </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1970,7 +1993,7 @@ if ($isViewMode) {
 
             function renderMyComment(comment) {
                 var item = document.createElement('div');
-                item.className = 'comment-item';
+                item.className = 'comment-item own';
                 item.setAttribute('data-comment-id', comment.id || '');
                 item.innerHTML =
                     '<div class="comment-avatar sa">' + currentUserInitial + '</div>' +
