@@ -606,6 +606,7 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
     .document-view-loading, .document-view-error { padding: 2rem; text-align: center; color: #64748b; }
     .document-view-error { color: #dc2626; }
     .send-stamp-overlay { position: absolute; transform: translate(-50%, -50%); pointer-events: auto; user-select: none; touch-action: none; cursor: move; max-width: none; max-height: none; z-index: 20; }
+    .fd-stamp-overlay { position: absolute; z-index: 19; object-fit: contain; max-width: none; max-height: none; pointer-events: none; opacity: 0.92; transform: translate(-50%, -50%); }
     .stamp-template-box { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; background: #fff; }
     .stamp-template-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 8px; }
     .stamp-template-btn { border: 1px solid #cbd5e1; background: #f8fafc; color: #334155; border-radius: 8px; padding: 9px 12px; font-size: 12px; font-weight: 700; cursor: pointer; text-align: center; }
@@ -734,16 +735,23 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
                                     $docTitle = htmlspecialchars($doc['documentTitle'] ?? $doc['document_title'] ?? '—');
                                     $docFileName = htmlspecialchars($doc['fileName'] ?? $doc['file_name'] ?? '—');
                                     $docStatus = isset($doc['status']) ? ucfirst(strtolower($doc['status'])) : 'Active';
+                                    $docRcvStamp = '';
+                                    if (!empty($doc['details'])) {
+                                        $parsedDet = @json_decode((string)$doc['details'], true);
+                                        if (is_array($parsedDet) && !empty($parsedDet['received_stamp'])) {
+                                            $docRcvStamp = htmlspecialchars(json_encode($parsedDet['received_stamp'], JSON_UNESCAPED_SLASHES), ENT_QUOTES);
+                                        }
+                                    }
                                 ?>
                                 <tr data-document-row data-document-id="<?php echo htmlspecialchars($docId); ?>">
                                     <td><?php echo (int)($idx + 1); ?></td>
                                     <td><?php echo $docCode; ?></td>
                                     <td><?php echo $docTitle; ?></td>
-                                    <td><a href="documents.php?view=<?php echo urlencode($docId); ?>" class="doc-file-link document-view-trigger" data-doc-id="<?php echo htmlspecialchars($docId); ?>" data-doc-name="<?php echo htmlspecialchars($docFileName); ?>" data-stamp-image="<?php echo htmlspecialchars((string)($doc['stamp_image'] ?? '')); ?>" data-stamp-width="<?php echo htmlspecialchars((string)($doc['stamp_width_pct'] ?? '18')); ?>" data-stamp-x="<?php echo htmlspecialchars((string)($doc['stamp_x_pct'] ?? '82')); ?>" data-stamp-y="<?php echo htmlspecialchars((string)($doc['stamp_y_pct'] ?? '84')); ?>"><?php echo $docFileName; ?></a></td>
+                                    <td><a href="documents.php?view=<?php echo urlencode($docId); ?>" class="doc-file-link document-view-trigger" data-doc-id="<?php echo htmlspecialchars($docId); ?>" data-doc-name="<?php echo htmlspecialchars($docFileName); ?>" data-stamp-image="<?php echo htmlspecialchars((string)($doc['stamp_image'] ?? '')); ?>" data-stamp-width="<?php echo htmlspecialchars((string)($doc['stamp_width_pct'] ?? '18')); ?>" data-stamp-x="<?php echo htmlspecialchars((string)($doc['stamp_x_pct'] ?? '82')); ?>" data-stamp-y="<?php echo htmlspecialchars((string)($doc['stamp_y_pct'] ?? '84')); ?>"<?php if ($docRcvStamp !== ''): ?> data-rcv-stamp="<?php echo $docRcvStamp; ?>"<?php endif; ?>><?php echo $docFileName; ?></a></td>
                                     <td><span class="document-status document-status-<?php echo strtolower(htmlspecialchars($docStatus)); ?>"><?php echo htmlspecialchars($docStatus); ?></span></td>
                                     <td>
                                         <div class="documents-actions-row">
-                                            <a href="documents.php?view=<?php echo urlencode($docId); ?>" class="documents-action-btn documents-action-open document-view-trigger" data-doc-id="<?php echo htmlspecialchars($docId); ?>" data-doc-name="<?php echo htmlspecialchars($docFileName); ?>" data-stamp-image="<?php echo htmlspecialchars((string)($doc['stamp_image'] ?? '')); ?>" data-stamp-width="<?php echo htmlspecialchars((string)($doc['stamp_width_pct'] ?? '18')); ?>" data-stamp-x="<?php echo htmlspecialchars((string)($doc['stamp_x_pct'] ?? '82')); ?>" data-stamp-y="<?php echo htmlspecialchars((string)($doc['stamp_y_pct'] ?? '84')); ?>" title="View document"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>View</a>
+                                            <a href="documents.php?view=<?php echo urlencode($docId); ?>" class="documents-action-btn documents-action-open document-view-trigger" data-doc-id="<?php echo htmlspecialchars($docId); ?>" data-doc-name="<?php echo htmlspecialchars($docFileName); ?>" data-stamp-image="<?php echo htmlspecialchars((string)($doc['stamp_image'] ?? '')); ?>" data-stamp-width="<?php echo htmlspecialchars((string)($doc['stamp_width_pct'] ?? '18')); ?>" data-stamp-x="<?php echo htmlspecialchars((string)($doc['stamp_x_pct'] ?? '82')); ?>" data-stamp-y="<?php echo htmlspecialchars((string)($doc['stamp_y_pct'] ?? '84')); ?>"<?php if ($docRcvStamp !== ''): ?> data-rcv-stamp="<?php echo $docRcvStamp; ?>"<?php endif; ?> title="View document"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>View</a>
                                             <div class="documents-send-wrap">
                                                 <button type="button" class="documents-action-btn documents-action-send documents-send-trigger" data-document-id="<?php echo htmlspecialchars($docId); ?>" title="Send" aria-haspopup="true" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send</button>
                                                 <div class="documents-send-dropdown" role="menu" aria-label="Send options">
@@ -1743,7 +1751,35 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
             targetEl.appendChild(stamp);
         }
 
-        function openDocumentViewModal(docId, docName, stampCfg) {
+        function applyReceivedStampOverlay(el, meta) {
+            if (!meta || !meta.image) return;
+            var pages = el.querySelectorAll('.docx-wrapper > section.docx, .docx-wrapper > section, .docx > section');
+            if (!pages.length) { var fb = el.querySelector('.docx-wrapper') || el.querySelector('.docx') || el.firstElementChild; if (fb) pages = [fb]; }
+            if (!pages.length) return;
+            var pageIdx = Math.max(0, (parseInt(meta.page, 10) || 1) - 1);
+            var targetPage = pages[pageIdx] || pages[0];
+            if (!targetPage) return;
+            if (!targetPage.style.position || targetPage.style.position === 'static') targetPage.style.position = 'relative';
+            var imgs = el.querySelectorAll('img');
+            for (var i = 0; i < imgs.length; i++) {
+                var alt = (imgs[i].alt || '').toLowerCase();
+                if (alt.indexOf('fdreceivedstamp') !== -1) {
+                    var wrapper = imgs[i].closest('span, div') || imgs[i].parentNode;
+                    if (wrapper && wrapper !== el) { wrapper.style.display = 'none'; } else { imgs[i].style.display = 'none'; }
+                    break;
+                }
+            }
+            var overlay = document.createElement('img');
+            overlay.className = 'fd-stamp-overlay';
+            overlay.src = meta.image;
+            overlay.alt = 'Receiving stamp';
+            overlay.style.width = Math.max(5, Math.min(60, parseFloat(meta.width) || 18)) + '%';
+            overlay.style.left = Math.max(1, Math.min(99, parseFloat(meta.x) || 14)) + '%';
+            overlay.style.top = Math.max(1, Math.min(99, parseFloat(meta.y) || 14)) + '%';
+            targetPage.appendChild(overlay);
+        }
+
+        function openDocumentViewModal(docId, docName, stampCfg, rcvStampMeta) {
             if (!documentViewModal || !documentViewContainer) return;
             documentViewModal.hidden = false;
             document.body.classList.add('modal-open');
@@ -1771,6 +1807,7 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
                     documentViewLoading.style.display = 'none';
                     if (typeof docx !== 'undefined' && docx.renderAsync) {
                         return docx.renderAsync(blob, documentViewContainer).then(function() {
+                            applyReceivedStampOverlay(documentViewContainer, rcvStampMeta);
                             applyStampOverlay(stampCfg);
                             documentViewContainer.style.display = 'block';
                         }).catch(function(err) {
@@ -1812,7 +1849,9 @@ if (isset($_GET['add_error']) && isset($_SESSION['documents_add_error'])) {
                     x: el.getAttribute('data-stamp-x') || '82',
                     y: el.getAttribute('data-stamp-y') || '84'
                 };
-                if (docId) openDocumentViewModal(docId, docName, stampCfg);
+                var rcvStampMeta = null;
+                try { var raw = el.getAttribute('data-rcv-stamp'); if (raw) rcvStampMeta = JSON.parse(raw); } catch(ex) {}
+                if (docId) openDocumentViewModal(docId, docName, stampCfg, rcvStampMeta);
             });
         });
 

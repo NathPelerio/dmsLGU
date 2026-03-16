@@ -182,6 +182,14 @@ $selectedExt = strtolower((string)pathinfo($selectedFileName, PATHINFO_EXTENSION
 $isSelectedImage = in_array($selectedExt, ['jpg', 'jpeg', 'png', 'gif', 'webp'], true);
 $isSelectedPdf = ($selectedExt === 'pdf');
 $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
+
+$receivedStampMeta = null;
+if ($selectedDocument && !empty($selectedDocument['details'])) {
+    $parsed = @json_decode((string)$selectedDocument['details'], true);
+    if (is_array($parsed) && !empty($parsed['received_stamp'])) {
+        $receivedStampMeta = $parsed['received_stamp'];
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -222,6 +230,7 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
         .viewer-fallback { border: 1px dashed #94a3b8; border-radius: 10px; background: #fff; padding: 24px; text-align: center; color: #475569; max-width: 420px; }
         #docx-container .docx-wrapper { background: #e2e8f0; padding: 18px 12px; }
         #docx-container .docx-wrapper > section.docx { margin: 0 auto 18px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.14); border: 1px solid #dbe3ef; }
+        .fd-stamp-overlay { position: absolute; z-index: 20; object-fit: contain; max-width: none; max-height: none; pointer-events: none; opacity: 0.92; transform: translate(-50%, -50%); }
         @media (max-width: 900px) { .viewer-frame { min-height: 520px; } .toolbar-page-count { margin-left: 0; } }
     </style>
 </head>
@@ -378,7 +387,9 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
     (function() {
         var container = document.getElementById('docx-container');
         var pageCountLabel = document.getElementById('docx-page-count');
+        var stampMeta = <?php echo $receivedStampMeta ? json_encode($receivedStampMeta, JSON_UNESCAPED_SLASHES) : 'null'; ?>;
         if (!container) return;
+
         function updatePageCount() {
             if (!pageCountLabel) return;
             var pageNodes = container.querySelectorAll('.docx-wrapper > section.docx');
@@ -388,11 +399,62 @@ $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
             var total = pageNodes ? pageNodes.length : 0;
             pageCountLabel.textContent = 'Pages: ' + (total > 0 ? total : 1);
         }
+
+        function hideEmbeddedStamp() {
+            var imgs = container.querySelectorAll('img');
+            for (var i = 0; i < imgs.length; i++) {
+                var alt = (imgs[i].alt || '').toLowerCase();
+                var title = (imgs[i].title || '').toLowerCase();
+                if (alt.indexOf('fdreceivedstamp') !== -1 || title.indexOf('fdreceivedstamp') !== -1) {
+                    var wrapper = imgs[i].closest('span, div') || imgs[i].parentNode;
+                    if (wrapper && wrapper !== container) {
+                        wrapper.style.display = 'none';
+                    } else {
+                        imgs[i].style.display = 'none';
+                    }
+                    return;
+                }
+            }
+        }
+
+        function applyReceivedStampOverlay() {
+            if (!stampMeta || !stampMeta.image) return;
+            var pages = container.querySelectorAll('.docx-wrapper > section.docx, .docx-wrapper > section, .docx > section');
+            if (!pages.length) {
+                var fb = container.querySelector('.docx-wrapper') || container.querySelector('.docx') || container.firstElementChild;
+                if (fb) pages = [fb];
+            }
+            if (!pages.length) return;
+            var pageIdx = Math.max(0, (parseInt(stampMeta.page, 10) || 1) - 1);
+            var targetPage = pages[pageIdx] || pages[0];
+            if (!targetPage) return;
+            if (!targetPage.style.position || targetPage.style.position === 'static') {
+                targetPage.style.position = 'relative';
+            }
+
+            hideEmbeddedStamp();
+
+            var overlay = document.createElement('img');
+            overlay.className = 'fd-stamp-overlay';
+            overlay.src = stampMeta.image;
+            overlay.alt = 'Receiving stamp';
+            var w = Math.max(5, Math.min(60, parseFloat(stampMeta.width) || 18));
+            var x = Math.max(1, Math.min(99, parseFloat(stampMeta.x) || 14));
+            var y = Math.max(1, Math.min(99, parseFloat(stampMeta.y) || 14));
+            overlay.style.width = w + '%';
+            overlay.style.left = x + '%';
+            overlay.style.top = y + '%';
+            targetPage.appendChild(overlay);
+        }
+
         fetch('documents.php?view=<?php echo urlencode($selectedDocumentId); ?>')
             .then(function(r) { if (!r.ok) throw new Error(); return r.blob(); })
             .then(function(blob) {
                 if (typeof docx !== 'undefined' && docx.renderAsync) {
-                    docx.renderAsync(blob, container, null, { breakPages: true, ignoreLastRenderedPageBreak: false }).then(function() { updatePageCount(); });
+                    docx.renderAsync(blob, container, null, { breakPages: true, ignoreLastRenderedPageBreak: false }).then(function() {
+                        updatePageCount();
+                        applyReceivedStampOverlay();
+                    });
                 }
             })
             .catch(function() {
