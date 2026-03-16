@@ -10,6 +10,35 @@
     min-height: 100vh;
     border-top: 3px solid #D4AF37;
 }
+.sidebar-toggle-btn {
+    position: fixed;
+    top: 14px;
+    right: 14px;
+    left: auto;
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: 10px;
+    background: #1A202C;
+    color: #fff;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 1700;
+    box-shadow: 0 8px 20px rgba(2, 6, 23, 0.25);
+}
+.sidebar-toggle-btn:hover { background: #2d3748; }
+.sidebar-toggle-btn svg { width: 22px; height: 22px; }
+.sidebar-mobile-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.5);
+    backdrop-filter: blur(2px);
+    z-index: 1550;
+    display: none;
+}
+.sidebar-mobile-overlay.show { display: block; }
 /* Sidebar: fixed position and size on every Super Admin page – never move or resize */
 .sidebar {
     position: fixed !important;
@@ -31,6 +60,7 @@
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Open Sans', sans-serif !important;
     font-size: 0.9375rem !important;
     flex-shrink: 0;
+    transform: translateX(0);
 }
 /* Force same font and base size for all sidebar content across all pages */
 .sidebar,
@@ -224,4 +254,22 @@
     overflow-x: auto;
     display: flex;
     flex-direction: column;
+}
+
+@media (max-width: 1200px) {
+    .sidebar-toggle-btn { display: inline-flex; }
+    .sidebar {
+        transform: translateX(-100%);
+        transition: transform 0.24s ease;
+        z-index: 1600;
+    }
+    .sidebar.sidebar-open {
+        transform: translateX(0);
+    }
+    .main-content {
+        margin-left: 0 !important;
+    }
+    body.sidebar-mobile-lock {
+        overflow: hidden;
+    }
 }

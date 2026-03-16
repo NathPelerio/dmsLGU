@@ -34,14 +34,25 @@ function getUsersList($config, $search = '') {
     try {
         $pdo = dbPdo($config);
         if ($search !== '') {
-            $like = '%' . $search . '%';
-            $stmt = $pdo->prepare(
-                'SELECT *
-                 FROM users
-                 WHERE username LIKE :s OR name LIKE :s OR email LIKE :s
-                 ORDER BY COALESCE(NULLIF(username, \'\'), NULLIF(name, \'\'), email) ASC'
-            );
-            $stmt->execute([':s' => $like]);
+            $terms = [$search];
+            foreach (preg_split('/\s+/', $search, -1, PREG_SPLIT_NO_EMPTY) as $part) {
+                if (!in_array($part, $terms, true)) {
+                    $terms[] = $part;
+                }
+            }
+            $whereParts = [];
+            $params = [];
+            foreach ($terms as $idx => $term) {
+                $paramKey = ':s' . $idx;
+                $whereParts[] = "(username LIKE {$paramKey} OR name LIKE {$paramKey} OR email LIKE {$paramKey})";
+                $params[$paramKey] = '%' . $term . '%';
+            }
+            $sql = 'SELECT *
+                    FROM users
+                    WHERE ' . implode(' OR ', $whereParts) . '
+                    ORDER BY COALESCE(NULLIF(username, \'\'), NULLIF(name, \'\'), email) ASC';
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
         } else {
             $stmt = $pdo->query('SELECT * FROM users ORDER BY COALESCE(NULLIF(username, \'\'), NULLIF(name, \'\'), email) ASC');
         }
@@ -53,7 +64,7 @@ function getUsersList($config, $search = '') {
 
 /**
  * Get office lookup maps for user table display.
- * @return array [officeNameById, officeNameByHeadUserId]
+ * @return array [officeNameById, officeNameByHeadUserId, officeCodeByDeptNameKey]
  */
 function getOfficeLookupMaps($config) {
     try {
@@ -62,6 +73,7 @@ function getOfficeLookupMaps($config) {
             "SELECT
                 o.office_id AS id,
                 o.office_name,
+                o.office_code,
                 h.user_id AS office_head_id
              FROM offices o
              LEFT JOIN users h
@@ -72,20 +84,25 @@ function getOfficeLookupMaps($config) {
         $rows = $stmt->fetchAll();
         $officeNameById = [];
         $officeNameByHeadUserId = [];
+        $officeCodeByDeptNameKey = [];
         foreach ($rows as $row) {
             $officeId = trim((string)($row['id'] ?? $row['_id'] ?? ''));
             $officeName = trim((string)($row['office_name'] ?? ''));
+            $officeCode = trim((string)($row['office_code'] ?? ''));
             $headUserId = trim((string)($row['office_head_id'] ?? ''));
             if ($officeId !== '' && $officeName !== '') {
                 $officeNameById[$officeId] = $officeName;
+                if ($officeCode !== '') {
+                    $officeCodeByDeptNameKey[strtolower($officeName)] = $officeCode;
+                }
             }
             if ($headUserId !== '' && $officeName !== '') {
                 $officeNameByHeadUserId[$headUserId] = $officeName;
             }
         }
-        return [$officeNameById, $officeNameByHeadUserId];
+        return [$officeNameById, $officeNameByHeadUserId, $officeCodeByDeptNameKey];
     } catch (Exception $e) {
-        return [[], []];
+        return [[], [], []];
     }
 }
 
@@ -130,6 +147,9 @@ function addUser($config, $username, $name, $email, $password, $role) {
     }
     $allowedRoles = ['superadmin', 'admin', 'user', 'staff', 'departmenthead', 'department_head', 'dept_head'];
     $role = strtolower(trim($role));
+    if ($role === 'frontdesk') {
+        $role = 'staff';
+    }
     if (!in_array($role, $allowedRoles)) {
         $role = 'user';
     }
@@ -140,9 +160,29 @@ function addUser($config, $username, $name, $email, $password, $role) {
         if ($check->fetch()) {
             return ['success' => false, 'message' => 'Username or email already exists.'];
         }
+        $officeId = null;
+        if (in_array($role, ['superadmin', 'admin', 'staff'], true)) {
+            $officeStmt = $pdo->prepare(
+                "SELECT office_id
+                 FROM offices
+                 WHERE UPPER(TRIM(office_code)) = 'MMO'
+                    OR LOWER(TRIM(office_name)) = LOWER(:office_name)
+                 ORDER BY CASE WHEN UPPER(TRIM(office_code)) = 'MMO' THEN 0 ELSE 1 END, office_id ASC
+                 LIMIT 1"
+            );
+            $officeStmt->execute([':office_name' => "Municipal Mayor's Office"]);
+            $officeRow = $officeStmt->fetch();
+            if (!$officeRow) {
+                return ['success' => false, 'message' => "Municipal Mayor's Office is not configured. Please add it in Offices/Department first."];
+            }
+            $officeId = (int)($officeRow['office_id'] ?? 0);
+            if ($officeId <= 0) {
+                return ['success' => false, 'message' => "Unable to resolve Municipal Mayor's Office. Please verify office setup."];
+            }
+        }
         $insert = $pdo->prepare(
-            'INSERT INTO users (username, name, email, password, role, created_at)
-             VALUES (:username, :name, :email, :password, :role, :created_at)'
+            'INSERT INTO users (username, name, email, password, role, office_id, created_at)
+             VALUES (:username, :name, :email, :password, :role, :office_id, :created_at)'
         );
         $insert->execute([
             ':username' => $username,
@@ -150,6 +190,7 @@ function addUser($config, $username, $name, $email, $password, $role) {
             ':email' => $email,
             ':password' => password_hash($password, PASSWORD_DEFAULT),
             ':role' => $role,
+            ':office_id' => $officeId,
             ':created_at' => dbNowUtcString(),
         ]);
         return ['success' => true, 'message' => 'User added successfully.'];
@@ -299,7 +340,15 @@ function updateUserAccountState($config, $targetUserId, $mode, $reason, $duratio
 $msg = $_GET['msg'] ?? null;
 $msgOk = isset($_GET['ok']) && $_GET['ok'] === '1';
 $search = trim($_GET['search'] ?? '');
-$roleFilter = trim($_GET['role'] ?? '');
+$roleFilter = strtolower(trim((string)($_GET['role'] ?? '')));
+$allowedRoleFilters = ['superadmin', 'admin', 'staff', 'frontdesk', 'departmenthead', 'department_head', 'dept_head'];
+if ($roleFilter === 'frontdesk') {
+    $roleFilter = 'staff';
+}
+if ($roleFilter !== '' && !in_array($roleFilter, $allowedRoleFilters, true)) {
+    $roleFilter = '';
+}
+$departmentFilter = trim((string)($_GET['dept'] ?? ''));
 $openAddUserModal = isset($_GET['open_add_user']) && $_GET['open_add_user'] === '1';
 $addUserInvalidField = trim((string)($_GET['field'] ?? ''));
 $addUserSuccess = $msgOk && $msg === 'User added successfully.';
@@ -544,7 +593,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $editModalData['username'] = trim((string)($_POST['username'] ?? ''));
         $editModalData['name'] = trim((string)($_POST['name'] ?? ''));
         $editModalData['email'] = trim((string)($_POST['email'] ?? ''));
-        $editModalData['role'] = strtolower(trim((string)($_POST['role'] ?? 'user')));
+        $editModalData['role'] = strtolower(trim((string)($_POST['role'] ?? '')));
+        if ($editModalData['role'] === 'frontdesk') {
+            $editModalData['role'] = 'staff';
+        }
         $openEditUserModal = true;
 
         $newPassword = (string)($_POST['password'] ?? '');
@@ -557,14 +609,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $editOtpExpiresAt = (int)($_SESSION['edit_user_change_otp_expires_at'] ?? 0);
         $formEmail = strtolower(trim((string)$editModalData['email']));
         $allowedRoles = ['superadmin', 'admin', 'user', 'staff', 'departmenthead', 'department_head', 'dept_head'];
-        if (!in_array($editModalData['role'], $allowedRoles, true)) {
-            $editModalData['role'] = 'user';
-        }
         $currentUser = null;
         if ($editModalData['user_id'] !== '') {
             try {
                 $pdo = dbPdo($config);
-                $currentUserStmt = $pdo->prepare('SELECT email FROM users WHERE user_id = :id LIMIT 1');
+                $currentUserStmt = $pdo->prepare('SELECT email, role FROM users WHERE user_id = :id LIMIT 1');
                 $currentUserStmt->execute([':id' => $editModalData['user_id']]);
                 $currentUser = $currentUserStmt->fetch() ?: null;
                 $editOriginalEmail = trim((string)($currentUser['email'] ?? ''));
@@ -572,6 +621,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $currentUser = null;
                 $editOriginalEmail = '';
             }
+        }
+        $currentRole = strtolower(trim((string)($currentUser['role'] ?? 'user')));
+        if ($currentRole === '') {
+            $currentRole = 'user';
+        }
+        if (!in_array($currentRole, $allowedRoles, true)) {
+            $currentRole = 'user';
+        }
+        if (!in_array($editModalData['role'], $allowedRoles, true)) {
+            // Preserve existing role when form role is empty/invalid.
+            $editModalData['role'] = $currentRole;
         }
         $emailChanged = strtolower($editOriginalEmail) !== $formEmail;
         if ($editModalData['user_id'] === '' || !$currentUser) {
@@ -728,27 +788,85 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$usersList = getUsersList($config, $search);
-list($officeNameById, $officeNameByHeadUserId) = getOfficeLookupMaps($config);
-if ($roleFilter !== '') {
-    $usersList = array_filter($usersList, function ($u) use ($roleFilter) {
-        return strtolower(trim($u['role'] ?? '')) === strtolower($roleFilter);
-    });
-    $usersList = array_values($usersList);
-}
-
 function formatRoleLabel($role) {
     $r = strtolower(trim($role ?? ''));
     $labels = [
         'superadmin' => 'Super Admin',
         'admin' => 'Admin',
         'user' => 'User',
-        'staff' => 'Staff',
+        'staff' => 'Frontdesk',
         'departmenthead' => 'Department Head',
         'department_head' => 'Department Head',
         'dept_head' => 'Department Head',
     ];
     return $labels[$r] ?? ucfirst($r) ?: '—';
+}
+
+function resolveUserDepartmentName($u, $officeNameById, $officeNameByHeadUserId) {
+    $dept = trim((string)($u['department'] ?? $u['user_department'] ?? $u['office_name'] ?? $u['office'] ?? ''));
+    if ($dept === '') {
+        $assignedOfficeId = trim((string)($u['office_id'] ?? $u['department_id'] ?? ''));
+        if ($assignedOfficeId !== '' && isset($officeNameById[$assignedOfficeId])) {
+            $dept = trim((string)$officeNameById[$assignedOfficeId]);
+        }
+    }
+    if ($dept === '') {
+        $currentUserId = trim((string)($u['user_id'] ?? $u['id'] ?? $u['_id'] ?? ''));
+        if ($currentUserId !== '' && isset($officeNameByHeadUserId[$currentUserId])) {
+            $dept = trim((string)$officeNameByHeadUserId[$currentUserId]);
+        }
+    }
+    return $dept;
+}
+
+$usersList = getUsersList($config, $search);
+list($officeNameById, $officeNameByHeadUserId, $officeCodeByDeptNameKey) = getOfficeLookupMaps($config);
+if ($roleFilter !== '') {
+    $usersList = array_filter($usersList, function ($u) use ($roleFilter) {
+        $userRole = strtolower(trim((string)($u['role'] ?? '')));
+        if (in_array($roleFilter, ['departmenthead', 'department_head', 'dept_head'], true)) {
+            return in_array($userRole, ['departmenthead', 'department_head', 'dept_head'], true);
+        }
+        return $userRole === $roleFilter;
+    });
+    $usersList = array_values($usersList);
+}
+
+$departmentTabs = [];
+foreach ($officeNameById as $officeName) {
+    $normalized = strtolower(trim((string)$officeName));
+    if ($normalized !== '' && !isset($departmentTabs[$normalized])) {
+        $departmentTabs[$normalized] = [
+            'name' => trim((string)$officeName),
+            'code' => trim((string)($officeCodeByDeptNameKey[$normalized] ?? '')),
+        ];
+    }
+}
+foreach ($usersList as $u) {
+    $resolvedDept = resolveUserDepartmentName($u, $officeNameById, $officeNameByHeadUserId);
+    $normalized = strtolower($resolvedDept);
+    if ($normalized !== '' && !isset($departmentTabs[$normalized])) {
+        $departmentTabs[$normalized] = [
+            'name' => $resolvedDept,
+            'code' => trim((string)($officeCodeByDeptNameKey[$normalized] ?? '')),
+        ];
+    }
+}
+if (!empty($departmentTabs)) {
+    uasort($departmentTabs, function ($a, $b) {
+        return strcasecmp((string)($a['name'] ?? ''), (string)($b['name'] ?? ''));
+    });
+}
+
+$isUnassignedFilter = ($departmentFilter === '__unassigned__');
+if ($departmentFilter !== '') {
+    $usersList = array_values(array_filter($usersList, function ($u) use ($departmentFilter, $isUnassignedFilter, $officeNameById, $officeNameByHeadUserId) {
+        $resolvedDept = resolveUserDepartmentName($u, $officeNameById, $officeNameByHeadUserId);
+        if ($isUnassignedFilter) {
+            return $resolvedDept === '';
+        }
+        return strcasecmp($resolvedDept, $departmentFilter) === 0;
+    }));
 }
 
 function getUserAccountStatusMeta($u) {
@@ -794,9 +912,39 @@ function getUserAccountStatusMeta($u) {
     <link rel="stylesheet" href="assets/css/sidebar_super_admin.css">
     <style>
         body { margin: 0; background: #f8fafc; color: #0f172a; }
-        .main-content { display: flex; flex-direction: column; flex: 1; min-height: 0; background: #fff; }
-        .content-header { background: #fff; padding: 1.5rem 2.2rem; border-bottom: 1px solid #e2e8f0; flex-shrink: 0; }
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            min-height: 0;
+            background: #fff;
+            /* Prevent sticky header from breaking due to parent overflow rules. */
+            overflow: visible !important;
+        }
+        .content-header {
+            background: #fff;
+            padding: 1.5rem 2.2rem;
+            border-bottom: 1px solid #e2e8f0;
+            flex-shrink: 0;
+            position: sticky !important;
+            top: 0 !important;
+            z-index: 1200;
+        }
         .dashboard-header { display: flex; justify-content: space-between; align-items: center; }
+        .dashboard-title-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .users-page-title { display: inline-flex; align-items: center; gap: 10px; }
+        .users-page-title-icon {
+            width: 34px;
+            height: 34px;
+            border-radius: 10px;
+            background: #eff6ff;
+            color: #1d4ed8;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
+        }
+        .users-page-title-icon svg { width: 19px; height: 19px; }
         .dashboard-header h1 { font-size: 1.6rem; margin: 0 0 0.2rem 0; font-weight: 700; color: #1e293b; }
         .dashboard-header small { display: block; color: #64748b; font-size: 0.95rem; margin-top: 6px; }
         .header-controls { position: relative; }
@@ -808,6 +956,26 @@ function getUserAccountStatusMeta($u) {
         .avatar-btn { width: 48px; height: 48px; padding: 0; border-radius: 10px; }
         .main-content .admin-content-body { padding-top: 24px; }
         .offices-card .offices-tools.doc-filter-row select { height: 42px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0 12px; font-size: 14px; color: #1e293b; background: #fff; font-family: 'Poppins', sans-serif; }
+        #users-filter-form { grid-template-columns: 1.4fr 1fr auto !important; }
+        #users-filter-form .users-search-wrap { position: relative; }
+        #users-filter-form .users-search-wrap input { width: 100%; padding-right: 38px !important; }
+        #users-filter-form .users-search-icon {
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 16px;
+            height: 16px;
+            color: #94a3b8;
+            pointer-events: none;
+        }
+        #users-filter-form #add-user-btn {
+            flex: 0 0 auto !important;
+            width: auto !important;
+            min-width: max-content;
+            justify-self: start;
+            white-space: nowrap;
+        }
         .users-toast { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 1500; display: flex; align-items: center; gap: 12px; padding: 0.875rem 1rem; border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,0.15); max-width: 360px; animation: users-toast-in 0.3s ease; }
         .users-toast.is-hiding { opacity: 0; transform: translateY(8px); transition: opacity 0.25s ease, transform 0.25s ease; }
         .users-toast.success { background: #22c55e; color: #fff; }
@@ -815,32 +983,239 @@ function getUserAccountStatusMeta($u) {
         @keyframes users-toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         /* Users table UX */
         .offices-card .offices-table-frame { border-radius: 12px; overflow: hidden; }
-        .offices-card .offices-table thead th { background: #f8fafc; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; padding: 14px 16px; border-bottom: 2px solid #e2e8f0; }
-        .offices-card .offices-table tbody td { padding: 14px 16px; vertical-align: middle; border-bottom: 1px solid #f1f5f9; }
-        .offices-card .offices-table tbody tr:hover { background: #f8fafc; }
+        .offices-card .offices-table thead th { background: #f8fafc; font-weight: 600; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.03em; padding: 10px 12px; border-bottom: 2px solid #e2e8f0; }
+        .offices-card .offices-table tbody td { padding: 9px 12px; vertical-align: middle; border-bottom: 1px solid #f1f5f9; font-size: 0.86rem; line-height: 1.25; }
+        .offices-card .offices-table tbody tr[data-user-row="1"]:nth-child(odd) { background: #ffffff; }
+        .offices-card .offices-table tbody tr[data-user-row="1"]:nth-child(even) { background: #eef4ff; }
+        .offices-card .offices-table tbody tr[data-user-row="1"]:hover { background: #dbeafe; }
         .offices-card .offices-table tbody tr:last-child td { border-bottom: none; }
-        .users-role-badge { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 0.8rem; font-weight: 500; }
+        .users-role-badge { display: inline-block; padding: 3px 8px; border-radius: 20px; font-size: 0.73rem; font-weight: 600; }
         .users-role-badge.superadmin { background: #fef3c7; color: #92400e; }
         .users-role-badge.admin { background: #dbeafe; color: #1e40af; }
         .users-role-badge.departmenthead, .users-role-badge.department_head, .users-role-badge.dept_head { background: #e0e7ff; color: #3730a3; }
         .users-role-badge.user, .users-role-badge.staff { background: #f1f5f9; color: #475569; }
-        .users-status-badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; line-height: 1.2; }
+        .users-status-badge { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 0.7rem; font-weight: 600; line-height: 1.15; }
         .users-status-badge.active { background: #dcfce7; color: #166534; }
         .users-status-badge.disabled { background: #fee2e2; color: #991b1b; }
         .users-status-badge.suspended { background: #fef3c7; color: #92400e; }
-        .users-status-hint { display: block; margin-top: 4px; font-size: 0.72rem; color: #64748b; }
+        .users-status-hint { display: block; margin-top: 2px; font-size: 0.68rem; color: #64748b; }
         .users-action-cell { white-space: nowrap; }
-        .users-action-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 8px; font-size: 0.85rem; font-weight: 500; text-decoration: none; color: #475569; background: #f1f5f9; border: 1px solid #e2e8f0; cursor: pointer; transition: background 0.2s, color 0.2s; font-family: inherit; }
+        .users-action-btn { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border-radius: 8px; font-size: 0.78rem; font-weight: 600; text-decoration: none; color: #475569; background: #f1f5f9; border: 1px solid #e2e8f0; cursor: pointer; transition: background 0.2s, color 0.2s; font-family: inherit; }
         .users-action-btn:hover { background: #e2e8f0; color: #1e293b; }
-        .users-action-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+        .users-action-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
         .users-action-btn.disable { background: #fee2e2; color: #b91c1c; border-color: #fecaca; }
         .users-action-btn.disable:hover { background: #fecaca; color: #991b1b; }
         .users-action-btn.suspend { background: #fef3c7; color: #92400e; border-color: #fde68a; }
         .users-action-btn.suspend:hover { background: #fde68a; color: #78350f; }
         .users-action-btn.enable { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
         .users-action-btn.enable:hover { background: #bbf7d0; color: #14532d; }
-        .users-action-stack { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+        .users-action-stack { display: inline-flex; gap: 6px; flex-wrap: wrap; }
         .offices-empty { padding: 2rem; text-align: center; color: #64748b; font-size: 0.95rem; }
+        .users-empty-state { display: inline-flex; flex-direction: column; align-items: center; gap: 10px; max-width: 480px; margin: 0 auto; }
+        .users-empty-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 999px;
+            background: #eff6ff;
+            color: #1d4ed8;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .users-empty-icon svg { width: 22px; height: 22px; }
+        .users-empty-link {
+            color: #1d4ed8;
+            font-weight: 600;
+            text-decoration: none;
+            border-bottom: 1px solid transparent;
+        }
+        .users-empty-link:hover { color: #1e40af; border-bottom-color: #93c5fd; }
+        .users-empty-info { color: #475569; font-size: 0.9rem; }
+        .users-dept-tabs-wrap {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 8px 0 14px;
+        }
+        .users-dept-tabs {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 8px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scroll-behavior: smooth;
+            scrollbar-width: thin;
+            min-width: 0;
+            flex: 1;
+            padding-bottom: 2px;
+        }
+        .users-dept-tabs::-webkit-scrollbar { height: 6px; }
+        .users-dept-tabs::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+        .users-dept-tab {
+            display: inline-flex;
+            align-items: center;
+            flex: 0 0 auto;
+            padding: 8px 14px;
+            border-radius: 999px;
+            border: 1px solid #dbe2ea;
+            background: #fff;
+            color: #475569;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1;
+            transition: all 0.15s ease;
+        }
+        .users-dept-tab:hover { border-color: #93c5fd; color: #1d4ed8; background: #eff6ff; }
+        .users-dept-tab.active { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
+        .users-dept-scroll-btn {
+            width: 32px;
+            height: 32px;
+            border: 1px solid #dbe2ea;
+            border-radius: 999px;
+            background: #fff;
+            color: #334155;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            flex: 0 0 auto;
+        }
+        .users-dept-scroll-btn:hover { border-color: #93c5fd; color: #1d4ed8; background: #eff6ff; }
+        .users-dept-scroll-btn:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+            background: #f8fafc;
+            color: #94a3b8;
+        }
+        .users-dept-scroll-btn svg { width: 16px; height: 16px; }
+        @media (max-width: 1100px) {
+            .content-header { padding: 1.15rem 1.2rem; }
+            .main-content .admin-content-body { padding-top: 14px; }
+            #users-filter-form { grid-template-columns: minmax(0, 1fr) 210px auto !important; gap: 10px; }
+            .users-dept-tab { padding: 7px 12px; font-size: 12px; }
+            .users-dept-tabs-wrap { margin: 6px 0 12px; }
+        }
+        @media (max-width: 1200px) {
+            .dashboard-title-wrap .sidebar-toggle-btn.in-header {
+                position: static !important;
+                top: auto !important;
+                right: auto !important;
+                left: auto !important;
+                width: 38px;
+                height: 38px;
+                border-radius: 10px;
+                margin: 0;
+                flex: 0 0 auto;
+                box-shadow: none;
+                background: #1e293b;
+                display: inline-flex;
+            }
+            .dashboard-title-wrap .sidebar-toggle-btn.in-header:hover { background: #334155; }
+            .sidebar.sidebar-open ~ .main-content .dashboard-title-wrap .sidebar-toggle-btn.in-header {
+                opacity: 0;
+                pointer-events: none;
+            }
+        }
+        @media (max-width: 900px) {
+            .dashboard-header { align-items: flex-start; gap: 10px; }
+            .dashboard-header h1 { font-size: 1.35rem; }
+            .dashboard-header small { font-size: 0.85rem; }
+            #users-filter-form { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important; }
+            #users-filter-form #add-user-btn { grid-column: 1 / -1; justify-self: stretch; justify-content: center; }
+            .offices-card .offices-table thead th { font-size: 0.7rem; padding: 9px 10px; }
+            .offices-card .offices-table tbody td { padding: 8px 10px; font-size: 0.82rem; }
+            .users-action-btn { padding: 4px 8px; font-size: 0.73rem; }
+        }
+        @media (max-width: 640px) {
+            .users-dept-scroll-btn { display: none; }
+        }
+        @media (max-width: 768px) {
+            .content-header { padding: 0.95rem 0.85rem; }
+            .users-page-title { gap: 8px; }
+            .users-page-title-icon { width: 30px; height: 30px; border-radius: 9px; }
+            .users-page-title-icon svg { width: 17px; height: 17px; }
+            .dashboard-header {
+                align-items: center;
+                gap: 8px;
+            }
+            .dashboard-title-wrap {
+                flex: 1;
+                min-width: 0;
+            }
+            .dashboard-header h1 { font-size: 1.16rem; margin-bottom: 0; }
+            .dashboard-header small { font-size: 0.78rem; margin-top: 3px; line-height: 1.25; }
+            .main-content .admin-content-body { padding: 10px 6px 0; }
+            .offices-card { padding: 12px; }
+            .offices-card .offices-table-frame {
+                border: none !important;
+                background: transparent !important;
+                box-shadow: none !important;
+                border-radius: 0 !important;
+                overflow: visible;
+            }
+            .offices-card .offices-table {
+                border: none !important;
+                background: transparent !important;
+            }
+            #users-filter-form { grid-template-columns: 1fr !important; gap: 8px; }
+            #users-filter-form .users-search-wrap input,
+            #users-filter-form select,
+            #users-filter-form #add-user-btn { height: 40px; }
+            #users-filter-form #add-user-btn { grid-column: auto; justify-self: stretch; width: 100% !important; }
+            .users-dept-tabs-wrap { margin: 6px 0 10px; gap: 6px; }
+            .users-dept-tab { padding: 7px 11px; font-size: 11.5px; }
+            .offices-card .offices-table { min-width: 0; }
+            .offices-card .offices-table thead { display: none; }
+            .offices-card .offices-table tbody tr[data-user-row="1"] {
+                display: block;
+                margin: 0 0 10px;
+                padding: 6px 10px;
+                border: 1px solid #dbe2ea;
+                border-radius: 12px;
+                background: #fff !important;
+                box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+            }
+            .offices-card .offices-table tbody tr[data-user-row="1"] td {
+                display: flex;
+                align-items: flex-start;
+                justify-content: space-between;
+                gap: 10px;
+                border-bottom: 1px dashed #e2e8f0;
+                padding: 8px 0;
+                font-size: 0.85rem;
+                line-height: 1.3;
+            }
+            .offices-card .offices-table tbody tr[data-user-row="1"] td:last-child { border-bottom: none; }
+            .offices-card .offices-table tbody tr[data-user-row="1"] td::before {
+                content: attr(data-label);
+                color: #64748b;
+                font-size: 0.72rem;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.02em;
+                flex: 0 0 120px;
+                padding-top: 2px;
+            }
+            .offices-card .offices-table tbody tr[data-user-row="1"] .users-action-cell { white-space: normal; }
+            .offices-card .offices-table tbody tr[data-user-row="1"] .users-action-stack { width: 100%; gap: 6px; }
+        }
+        @media (max-width: 480px) {
+            .content-header { padding: 0.85rem 0.7rem; }
+            .users-page-title-icon { width: 28px; height: 28px; }
+            .dashboard-header h1 { font-size: 1.04rem; }
+            .dashboard-header small { display: none; }
+            .main-content .admin-content-body { padding: 8px 4px 0; }
+            .offices-card { padding: 10px; border-radius: 10px; }
+            .users-empty-state { gap: 8px; }
+            .users-empty-info { font-size: 0.82rem; }
+            .offices-card .offices-table tbody tr[data-user-row="1"] {
+                margin: 0 0 8px;
+                padding: 6px 7px;
+            }
+            .offices-card .offices-table tbody tr[data-user-row="1"] td::before { flex-basis: 104px; font-size: 0.68rem; }
+        }
         #add-user-modal .doc-modal-dialog { width: min(640px, calc(100vw - 24px)); border-radius: 14px; overflow: hidden; }
         #add-user-modal .doc-modal-header { padding: 16px 18px; border-bottom: 1px solid #e2e8f0; background: #ffffff; }
         #add-user-modal .doc-modal-header h2 { margin: 0; font-size: 1.3rem; color: #1e293b; }
@@ -1050,9 +1425,19 @@ function getUserAccountStatusMeta($u) {
         <div class="main-content">
             <div class="content-header">
                 <div class="dashboard-header">
-                    <div>
-                        <h1>Welcome, <?php echo htmlspecialchars($welcomeUsername); ?>!</h1>
-                        <small>Municipal Document Management System – Users / Accounts</small>
+                    <div class="dashboard-title-wrap">
+                        <h1 class="users-page-title">
+                            <span class="users-page-title-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M17 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+                                    <circle cx="9" cy="7" r="4"></circle>
+                                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                                    <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                                </svg>
+                            </span>
+                            <span>User Management</span>
+                        </h1>
+                        <small>Manage user accounts and roles</small>
                     </div>
                     <div style="display: flex; align-items: center; gap: 12px;">
                         <div class="header-controls">
@@ -1069,26 +1454,67 @@ function getUserAccountStatusMeta($u) {
                         <span class="users-toast-text"><?= htmlspecialchars($msg) ?></span>
                     </div>
                     <?php endif; ?>
-                    <form method="get" class="offices-tools doc-filter-row" id="users-filter-form">
-                        <input type="text" name="search" placeholder="Search by name or email" aria-label="Search" value="<?= htmlspecialchars($search) ?>">
+                    <form method="get" class="offices-tools doc-filter-row" id="users-filter-form" autocomplete="off">
+                        <div class="users-search-wrap">
+                            <input type="text" name="search" placeholder="Search by name or email" aria-label="Search" value="<?= htmlspecialchars($search) ?>">
+                            <svg class="users-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <circle cx="11" cy="11" r="7"></circle>
+                                <line x1="16.65" y1="16.65" x2="21" y2="21"></line>
+                            </svg>
+                        </div>
+                        <input type="hidden" name="dept" value="<?= htmlspecialchars($departmentFilter) ?>">
                         <select name="role" aria-label="Filter by role">
-                            <option value="">All Roles</option>
+                            <option value="" <?= $roleFilter === '' ? 'selected' : '' ?>>All Roles</option>
                             <option value="superadmin" <?= $roleFilter === 'superadmin' ? 'selected' : '' ?>>Super Admin</option>
                             <option value="admin" <?= $roleFilter === 'admin' ? 'selected' : '' ?>>Admin</option>
-                            <option value="user" <?= $roleFilter === 'user' ? 'selected' : '' ?>>User</option>
-                            <option value="staff" <?= $roleFilter === 'staff' ? 'selected' : '' ?>>Staff</option>
+                            <option value="staff" <?= $roleFilter === 'staff' ? 'selected' : '' ?>>Frontdesk</option>
                             <option value="departmenthead" <?= $roleFilter === 'departmenthead' ? 'selected' : '' ?>>Department Head</option>
                         </select>
-                        <button type="submit" class="offices-btn offices-btn-secondary">Filter</button>
                         <button type="button" class="offices-btn" id="add-user-btn">
                             <svg class="offices-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
                             Add User
                         </button>
-                        <button type="button" class="offices-btn offices-btn-secondary" id="edit-user-btn">
-                            <svg class="offices-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                            Edit
-                        </button>
                     </form>
+
+                    <div class="users-dept-tabs-wrap">
+                        <button type="button" class="users-dept-scroll-btn" id="users-dept-scroll-left" aria-label="Scroll departments left" hidden>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                        </button>
+                        <div class="users-dept-tabs" id="users-dept-tabs">
+                        <?php
+                            $baseFilterQuery = [];
+                            if ($search !== '') {
+                                $baseFilterQuery['search'] = $search;
+                            }
+                            if ($roleFilter !== '') {
+                                $baseFilterQuery['role'] = $roleFilter;
+                            }
+                            $allQuery = $baseFilterQuery;
+                            $allHref = 'users.php' . (!empty($allQuery) ? ('?' . http_build_query($allQuery)) : '');
+                        ?>
+                        <a href="<?= htmlspecialchars($allHref) ?>" class="users-dept-tab <?= $departmentFilter === '' ? 'active' : '' ?>">All Departments</a>
+                        <?php foreach ($departmentTabs as $deptTab): ?>
+                            <?php
+                                $deptTabLabel = trim((string)($deptTab['name'] ?? ''));
+                                $deptTabCode = trim((string)($deptTab['code'] ?? ''));
+                                $deptTabText = $deptTabCode !== '' ? $deptTabCode : $deptTabLabel;
+                                $deptQuery = $baseFilterQuery;
+                                $deptQuery['dept'] = $deptTabLabel;
+                                $deptHref = 'users.php?' . http_build_query($deptQuery);
+                            ?>
+                            <a href="<?= htmlspecialchars($deptHref) ?>" title="<?= htmlspecialchars($deptTabLabel) ?>" class="users-dept-tab <?= strcasecmp($departmentFilter, $deptTabLabel) === 0 ? 'active' : '' ?>"><?= htmlspecialchars($deptTabText) ?></a>
+                        <?php endforeach; ?>
+                        <?php
+                            $unassignedQuery = $baseFilterQuery;
+                            $unassignedQuery['dept'] = '__unassigned__';
+                            $unassignedHref = 'users.php?' . http_build_query($unassignedQuery);
+                        ?>
+                        <a href="<?= htmlspecialchars($unassignedHref) ?>" class="users-dept-tab <?= $isUnassignedFilter ? 'active' : '' ?>">Unassigned</a>
+                        </div>
+                        <button type="button" class="users-dept-scroll-btn" id="users-dept-scroll-right" aria-label="Scroll departments right" hidden>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                        </button>
+                    </div>
 
                     <div class="offices-table-frame">
                         <table class="offices-table">
@@ -1106,38 +1532,43 @@ function getUserAccountStatusMeta($u) {
                             <tbody id="users-table-body">
                                 <?php if (count($usersList) === 0): ?>
                                 <tr>
-                                    <td colspan="7" class="offices-empty" id="no-users-row">No users found. Try adjusting the search or filter, or add a new user.</td>
+                                    <td colspan="7" class="offices-empty" id="no-users-row">
+                                        <div class="users-empty-state">
+                                            <span class="users-empty-icon" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                    <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"></path>
+                                                    <line x1="12" y1="10" x2="12" y2="16"></line>
+                                                    <line x1="9" y1="13" x2="15" y2="13"></line>
+                                                </svg>
+                                            </span>
+                                            <span>No users found for this tab/filter.</span>
+                                            <span class="users-empty-info">To add a department, click <a class="users-empty-link" href="offices-department.php">add here</a>.</span>
+                                            <span class="users-empty-info">To add user, click add <a class="users-empty-link js-open-add-user-inline" href="#">here</a>.</span>
+                                        </div>
+                                    </td>
                                 </tr>
                                 <?php else:
                                     $no = 1;
                                     foreach ($usersList as $u):
                                         $displayName = trim($u['name'] ?? '') ?: (trim($u['username'] ?? '') ?: trim($u['email'] ?? ''));
                                         if ($displayName === '') $displayName = '—';
-                                        $dept = trim((string)($u['department'] ?? $u['user_department'] ?? $u['office_name'] ?? $u['office'] ?? ''));
-                                        if ($dept === '') {
-                                            $assignedOfficeId = trim((string)($u['office_id'] ?? $u['department_id'] ?? ''));
-                                            if ($assignedOfficeId !== '' && isset($officeNameById[$assignedOfficeId])) {
-                                                $dept = $officeNameById[$assignedOfficeId];
-                                            }
-                                        }
-                                        if ($dept === '') {
-                                            $currentUserId = trim((string)($u['user_id'] ?? $u['id'] ?? $u['_id'] ?? ''));
-                                            if ($currentUserId !== '' && isset($officeNameByHeadUserId[$currentUserId])) {
-                                                $dept = $officeNameByHeadUserId[$currentUserId];
-                                            }
-                                        }
+                                        $dept = resolveUserDepartmentName($u, $officeNameById, $officeNameByHeadUserId);
                                         if ($dept === '') $dept = '—';
                                         $rawRole = strtolower(trim($u['role'] ?? ''));
                                         $roleClass = $rawRole ?: 'user';
                                         $statusMeta = getUserAccountStatusMeta($u);
                                         $showEnableBtn = in_array($statusMeta['class'], ['disabled', 'suspended'], true);
                                 ?>
-                                <tr>
-                                    <td><?= (int)$no ?></td>
-                                    <td><?= htmlspecialchars($displayName) ?></td>
-                                    <td><?= htmlspecialchars(trim($u['email'] ?? '') ?: '—') ?></td>
-                                    <td><span class="users-role-badge <?= htmlspecialchars($roleClass) ?>"><?= htmlspecialchars(formatRoleLabel($u['role'] ?? '')) ?></span></td>
-                                    <td>
+                                <tr
+                                    data-user-row="1"
+                                    data-role="<?= htmlspecialchars($rawRole) ?>"
+                                    data-search="<?= htmlspecialchars(strtolower($displayName . ' ' . trim((string)($u['email'] ?? '')) . ' ' . $dept . ' ' . trim((string)($u['username'] ?? '')))) ?>"
+                                >
+                                    <td data-label="No."><?= (int)$no ?></td>
+                                    <td data-label="Name"><?= htmlspecialchars($displayName) ?></td>
+                                    <td data-label="Email"><?= htmlspecialchars(trim($u['email'] ?? '') ?: '—') ?></td>
+                                    <td data-label="Role"><span class="users-role-badge <?= htmlspecialchars($roleClass) ?>"><?= htmlspecialchars(formatRoleLabel($u['role'] ?? '')) ?></span></td>
+                                    <td data-label="Status">
                                         <span class="users-status-badge <?= htmlspecialchars($statusMeta['class']) ?>"><?= htmlspecialchars($statusMeta['label']) ?></span>
                                         <?php if (($statusMeta['class'] ?? '') === 'suspended'): ?>
                                         <small
@@ -1148,8 +1579,8 @@ function getUserAccountStatusMeta($u) {
                                         <small class="users-status-hint"><?= htmlspecialchars($statusMeta['hint']) ?></small>
                                         <?php endif; ?>
                                     </td>
-                                    <td><?= htmlspecialchars($dept) ?></td>
-                                    <td class="users-action-cell">
+                                    <td data-label="Office / Department"><?= htmlspecialchars($dept) ?></td>
+                                    <td data-label="Action" class="users-action-cell">
                                         <div class="users-action-stack">
                                             <button type="button" class="users-action-btn js-edit-user-btn" title="Edit user"
                                                 data-user-id="<?= htmlspecialchars($u['user_id'] ?? $u['id'] ?? $u['_id'] ?? '') ?>"
@@ -1216,7 +1647,7 @@ function getUserAccountStatusMeta($u) {
                     <select id="add-user-role" name="role" class="offices-select">
                         <option value="admin">Admin</option>
                         <option value="superadmin">Super Admin</option>
-                        <option value="staff">Staff</option>
+                        <option value="staff">Frontdesk</option>
                         <option value="departmenthead">Department Head</option>
                     </select>
                 </div>
@@ -1290,7 +1721,7 @@ function getUserAccountStatusMeta($u) {
                         <option value="user" <?= $editRole === 'user' ? 'selected' : '' ?>>User</option>
                         <option value="admin" <?= $editRole === 'admin' ? 'selected' : '' ?>>Admin</option>
                         <option value="superadmin" <?= $editRole === 'superadmin' ? 'selected' : '' ?>>Super Admin</option>
-                        <option value="staff" <?= $editRole === 'staff' ? 'selected' : '' ?>>Staff</option>
+                        <option value="staff" <?= $editRole === 'staff' ? 'selected' : '' ?>>Frontdesk</option>
                         <option value="departmenthead" <?= in_array($editRole, ['departmenthead', 'department_head', 'dept_head'], true) ? 'selected' : '' ?>>Department Head</option>
                     </select>
                 </div>
@@ -1425,6 +1856,19 @@ function getUserAccountStatusMeta($u) {
         }
 
         var addBtn = document.getElementById('add-user-btn');
+        var usersFilterForm = document.getElementById('users-filter-form');
+        var usersSearchInput = usersFilterForm ? usersFilterForm.querySelector('input[name="search"]') : null;
+        var usersRoleSelect = usersFilterForm ? usersFilterForm.querySelector('select[name="role"]') : null;
+        var usersDeptTabs = document.getElementById('users-dept-tabs');
+        var usersDeptScrollLeft = document.getElementById('users-dept-scroll-left');
+        var usersDeptScrollRight = document.getElementById('users-dept-scroll-right');
+        var usersTableBody = document.getElementById('users-table-body');
+        var headerTitleWrap = document.querySelector('.dashboard-title-wrap');
+        var sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+        if (headerTitleWrap && sidebarToggleBtn && !headerTitleWrap.contains(sidebarToggleBtn)) {
+            sidebarToggleBtn.classList.add('in-header');
+            headerTitleWrap.insertBefore(sidebarToggleBtn, headerTitleWrap.firstChild);
+        }
         var modal = document.getElementById('add-user-modal');
         var form = document.getElementById('add-user-form');
         var errorEl = document.getElementById('add-user-form-error');
@@ -1449,6 +1893,151 @@ function getUserAccountStatusMeta($u) {
             'add-user-password',
             'add-user-confirm-password'
         ];
+        function updateUsersDeptScrollButtons() {
+            if (!usersDeptTabs || !usersDeptScrollLeft || !usersDeptScrollRight) return;
+            var hasOverflow = usersDeptTabs.scrollWidth > (usersDeptTabs.clientWidth + 2);
+            usersDeptScrollLeft.hidden = !hasOverflow;
+            usersDeptScrollRight.hidden = !hasOverflow;
+            if (!hasOverflow) return;
+            var maxLeft = usersDeptTabs.scrollWidth - usersDeptTabs.clientWidth;
+            var currentLeft = usersDeptTabs.scrollLeft;
+            usersDeptScrollLeft.disabled = currentLeft <= 4;
+            usersDeptScrollRight.disabled = currentLeft >= (maxLeft - 4);
+        }
+        function scrollUsersDeptTabs(direction) {
+            if (!usersDeptTabs) return;
+            var delta = Math.max(180, Math.round(usersDeptTabs.clientWidth * 0.55));
+            usersDeptTabs.scrollBy({
+                left: direction === 'left' ? -delta : delta,
+                behavior: 'smooth'
+            });
+        }
+        if (usersDeptTabs) {
+            usersDeptTabs.addEventListener('scroll', updateUsersDeptScrollButtons);
+            window.addEventListener('resize', updateUsersDeptScrollButtons);
+            updateUsersDeptScrollButtons();
+        }
+        if (usersDeptScrollLeft) {
+            usersDeptScrollLeft.addEventListener('click', function() {
+                scrollUsersDeptTabs('left');
+            });
+        }
+        if (usersDeptScrollRight) {
+            usersDeptScrollRight.addEventListener('click', function() {
+                scrollUsersDeptTabs('right');
+            });
+        }
+        function getUsersDataRows() {
+            if (!usersTableBody) return [];
+            return Array.prototype.slice.call(usersTableBody.querySelectorAll('tr[data-user-row="1"]'));
+        }
+        function ensureNoUsersRow() {
+            if (!usersTableBody) return null;
+            var existing = document.getElementById('no-users-row');
+            if (existing) return existing;
+            var row = document.createElement('tr');
+            var cell = document.createElement('td');
+            cell.colSpan = 7;
+            cell.className = 'offices-empty';
+            cell.id = 'no-users-row';
+            cell.innerHTML = ''
+                + '<div class="users-empty-state">'
+                + '  <span class="users-empty-icon" aria-hidden="true">'
+                + '    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+                + '      <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"></path>'
+                + '      <line x1="12" y1="10" x2="12" y2="16"></line>'
+                + '      <line x1="9" y1="13" x2="15" y2="13"></line>'
+                + '    </svg>'
+                + '  </span>'
+                + '  <span>No users found for this tab/filter.</span>'
+                + '  <span class="users-empty-info">To add a department, click <a class="users-empty-link" href="offices-department.php">add here</a>.</span>'
+                + '  <span class="users-empty-info">To add user, click add <a class="users-empty-link js-open-add-user-inline" href="#">here</a>.</span>'
+                + '</div>';
+            row.appendChild(cell);
+            usersTableBody.appendChild(row);
+            return cell;
+        }
+        function normalizeRoleFilter(roleValue) {
+            var role = (roleValue || '').toLowerCase().trim();
+            if (role === 'frontdesk') return 'staff';
+            if (role === 'department_head' || role === 'dept_head') return 'departmenthead';
+            return role;
+        }
+        function roleMatchesFilter(rowRole, selectedRole) {
+            if (!selectedRole) return true;
+            var normalizedRowRole = (rowRole || '').toLowerCase().trim();
+            if (selectedRole === 'departmenthead') {
+                return normalizedRowRole === 'departmenthead'
+                    || normalizedRowRole === 'department_head'
+                    || normalizedRowRole === 'dept_head';
+            }
+            return normalizedRowRole === selectedRole;
+        }
+        function searchMatchesFilter(haystack, query) {
+            var q = (query || '').toLowerCase().trim();
+            if (!q) return true;
+            var terms = q.split(/\s+/).filter(function(part) { return !!part; });
+            if (!terms.length) return true;
+            var text = (haystack || '').toLowerCase();
+            for (var i = 0; i < terms.length; i++) {
+                if (text.indexOf(terms[i]) === -1) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        function applyUsersClientFilter() {
+            var rows = getUsersDataRows();
+            if (!rows.length) return;
+            var query = usersSearchInput ? usersSearchInput.value : '';
+            var selectedRole = normalizeRoleFilter(usersRoleSelect ? usersRoleSelect.value : '');
+            var visibleNo = 1;
+            var visibleCount = 0;
+            rows.forEach(function(row) {
+                var rowRole = row.getAttribute('data-role') || '';
+                var rowSearch = row.getAttribute('data-search') || '';
+                var matched = roleMatchesFilter(rowRole, selectedRole) && searchMatchesFilter(rowSearch, query);
+                row.style.display = matched ? '' : 'none';
+                if (matched) {
+                    visibleCount += 1;
+                    var numberCell = row.querySelector('td');
+                    if (numberCell) {
+                        numberCell.textContent = String(visibleNo++);
+                    }
+                }
+            });
+            var noUsersCell = ensureNoUsersRow();
+            if (noUsersCell) {
+                noUsersCell.parentElement.style.display = visibleCount === 0 ? '' : 'none';
+            }
+        }
+        if (usersFilterForm) {
+            usersFilterForm.addEventListener('submit', function(e) {
+                e.preventDefault();
+                applyUsersClientFilter();
+            });
+        }
+        if (usersSearchInput) {
+            usersSearchInput.addEventListener('input', applyUsersClientFilter);
+            usersSearchInput.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    applyUsersClientFilter();
+                }
+            });
+        }
+        if (usersRoleSelect) {
+            usersRoleSelect.addEventListener('change', applyUsersClientFilter);
+        }
+        if (usersTableBody) {
+            usersTableBody.addEventListener('click', function(e) {
+                var addInlineLink = e.target && e.target.closest ? e.target.closest('.js-open-add-user-inline') : null;
+                if (!addInlineLink) return;
+                e.preventDefault();
+                openAddUserModal(true);
+            });
+        }
+        applyUsersClientFilter();
         function isStrongPassword(value) {
             return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(value || '');
         }
@@ -1865,6 +2454,15 @@ function getUserAccountStatusMeta($u) {
                 });
             });
         }
+        function normalizeEditRoleValue(roleValue) {
+            var role = (roleValue || '').toLowerCase().trim();
+            if (role === 'frontdesk') return 'staff';
+            if (role === 'department_head' || role === 'dept_head') return 'departmenthead';
+            if (role === 'superadmin' || role === 'admin' || role === 'user' || role === 'staff' || role === 'departmenthead') {
+                return role;
+            }
+            return 'user';
+        }
         function openEditUserModal(userData) {
             if (!editModal) return;
             if (userData) {
@@ -1876,7 +2474,7 @@ function getUserAccountStatusMeta($u) {
                 clearEditEmailChangeOtp();
                 stopEditOtpResendCooldown();
                 closeEditOtpConfirmModal(false);
-                if (editRole) editRole.value = userData.role || 'user';
+                if (editRole) editRole.value = normalizeEditRoleValue(userData.role || 'user');
                 if (editPwd) editPwd.value = '';
                 if (editConfirmPwd) editConfirmPwd.value = '';
             }

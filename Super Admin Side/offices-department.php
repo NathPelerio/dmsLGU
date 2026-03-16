@@ -40,6 +40,7 @@ function getUsers() {
     try {
         global $config;
         $pdo = dbPdo($config);
+        $headRoleSql = departmentHeadRolesSqlList();
         $stmt = $pdo->query(
             "SELECT
                 user_id,
@@ -49,6 +50,7 @@ function getUsers() {
                 role,
                 office_id
              FROM users
+             WHERE LOWER(TRIM(role)) IN (" . $headRoleSql . ")
              ORDER BY COALESCE(NULLIF(username, ''), NULLIF(name, ''), email) ASC"
         );
         $rows = [];
@@ -132,6 +134,7 @@ function getOfficeDocumentStats() {
         $pdo = dbPdo($config);
         $receivedByOffice = [];
         $sentByHead = [];
+        $pendingByOffice = [];
         $archivedByHead = [];
         $receivedSendersByOffice = [];
         $sentRecipientsByHead = [];
@@ -150,6 +153,21 @@ function getOfficeDocumentStats() {
                 continue;
             }
             $receivedByOffice[$officeId] = (int)($row['total'] ?? 0);
+        }
+
+        $pendingStmt = $pdo->query(
+            "SELECT to_office_id AS office_id, COUNT(*) AS total
+             FROM document_routes
+             WHERE to_office_id IS NOT NULL
+               AND LOWER(TRIM(COALESCE(status, ''))) LIKE 'pending%'
+             GROUP BY to_office_id"
+        );
+        foreach ($pendingStmt as $row) {
+            $officeId = (string)($row['office_id'] ?? '');
+            if ($officeId === '') {
+                continue;
+            }
+            $pendingByOffice[$officeId] = (int)($row['total'] ?? 0);
         }
 
         $receivedSendersStmt = $pdo->query(
@@ -248,6 +266,7 @@ function getOfficeDocumentStats() {
         return [
             'received_by_office' => $receivedByOffice,
             'sent_by_head' => $sentByHead,
+            'pending_by_office' => $pendingByOffice,
             'archived_by_head' => $archivedByHead,
             'received_senders_by_office' => $receivedSendersByOffice,
             'sent_recipients_by_head' => $sentRecipientsByHead,
@@ -256,6 +275,7 @@ function getOfficeDocumentStats() {
         return [
             'received_by_office' => [],
             'sent_by_head' => [],
+            'pending_by_office' => [],
             'archived_by_head' => [],
             'received_senders_by_office' => [],
             'sent_recipients_by_head' => [],
@@ -506,13 +526,15 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
     <title>DMS LGU – Offices/Department</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="assets/css/styles.css">
-    <link rel="stylesheet" href="assets/css/sidebar_super_admin.css">
+    <?php $sidebarCssVer = @filemtime(__DIR__ . '/assets/css/sidebar_super_admin.css') ?: time(); ?>
+    <link rel="stylesheet" href="assets/css/sidebar_super_admin.css?v=<?= (int)$sidebarCssVer ?>">
     <link rel="stylesheet" href="assets/css/profile_modal_super_admin.css">
     <style>
         body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
         .main-content { background: #f8fafc; }
         .content-header { background: #fff; padding: 1.5rem 2.2rem; border-bottom: 1px solid #e2e8f0; }
-        .dashboard-header { display: flex; justify-content: space-between; align-items: center; }
+        .dashboard-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: nowrap; }
+        .dashboard-title-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
         .dashboard-header h1 { font-size: 1.6rem; margin: 0 0 0.2rem 0; font-weight: 700; color: #1e293b; }
         .dashboard-header small { display: block; color: #64748b; font-size: 0.95rem; margin-top: 6px; }
         .content-body { padding: 2rem 2.2rem; }
@@ -588,9 +610,23 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .delete-confirm-btn-cancel:hover { background: #f8fafc; color: #1e293b; }
         .delete-confirm-btn-delete { padding: 10px 20px; border: none; background: #dc2626; color: #fff; border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
         .delete-confirm-btn-delete:hover { background: #b91c1c; color: #fff; }
-        .main-content { background: #f1f5f9; }
-        .dept-page-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
-        .dept-page-title { margin: 0; font-size: 1.75rem; font-weight: 700; color: #1e293b; }
+        .main-content {
+            background: #f1f5f9;
+            /* Keep sticky header working even with shared sidebar styles. */
+            overflow: visible !important;
+        }
+        .content-header {
+            position: sticky;
+            top: 0;
+            z-index: 1200;
+        }
+        .dept-page-header { display: block; margin: 0; }
+        .dept-header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; flex-shrink: 0; }
+        .dept-content-actions { display: flex; justify-content: flex-end; margin-bottom: 0.9rem; }
+        .dept-page-title-row { display: flex; align-items: center; gap: 0.7rem; }
+        .dept-page-title-icon { width: 34px; height: 34px; border-radius: 10px; background: #dbeafe; color: #2563eb; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .dept-page-title-icon svg { width: 19px; height: 19px; }
+        .dept-page-title { margin: 0; font-size: 1.6rem; font-weight: 700; color: #1e293b; }
         .dept-page-subtitle { margin: 0.25rem 0 0 0; font-size: 0.95rem; color: #64748b; }
         .dept-add-btn { display: inline-flex; align-items: center; gap: 8px; padding: 0.6rem 1.25rem; background: #1A202C; color: #fff; border: none; border-radius: 10px; font-size: 0.95rem; font-weight: 600; cursor: pointer; text-decoration: none; transition: background 0.15s; }
         .dept-add-btn:hover { background: #2d3748; color: #fff; }
@@ -623,8 +659,9 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .dept-card-head-label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 0.25rem 0; }
         .dept-card-head-value { font-size: 0.9rem; font-weight: 500; color: #0f172a; margin: 0; }
         .dept-card-head-value.not-assigned { color: #94a3b8; font-weight: 500; }
-        .dept-card-flow-stats { margin-top: 0.6rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 0.9rem; row-gap: 0.2rem; }
-        .dept-card-flow-stat { margin: 0; font-size: 0.95rem; color: #475569; }
+        .dept-card-flow-stats { margin-top: 0.6rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 0.9rem; row-gap: 0.5rem; }
+        .dept-card-flow-stat { margin: 0; font-size: 0.95rem; color: #475569; display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.45rem 0.55rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; min-height: 36px; }
+        .dept-card-flow-stat svg { width: 14px; height: 14px; color: #64748b; flex-shrink: 0; }
         .dept-card-flow-stat strong { color: #1e293b; font-weight: 700; font-size: 1rem; }
         .view-flow-value { font-size: 1.08rem !important; font-weight: 600; }
         .dept-card-created-section { margin-top: auto; padding-top: 0.75rem; border-top: 1px solid #e5e7eb; }
@@ -636,6 +673,11 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .dept-card-dropdown { position: absolute; right: 0; top: 100%; margin-top: 4px; background: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border: 1px solid #e5e7eb; padding: 6px 0; min-width: 180px; z-index: 50; display: none; }
         .dept-card-dropdown.show { display: block; }
         .dept-empty { text-align: center; padding: 3rem 1rem; color: #64748b; font-size: 1rem; }
+        .dept-empty.dept-empty-live { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.65rem; color: #64748b; }
+        .dept-empty.dept-empty-live svg { width: 34px; height: 34px; color: #94a3b8; }
+        .dept-empty.dept-empty-live span { font-size: 1.02rem; color: #475569; }
+        .dept-empty.dept-empty-live .dept-empty-add-link { color: #2563eb; font-weight: 600; text-decoration: underline; cursor: pointer; }
+        .dept-empty.dept-empty-live .dept-empty-add-link:hover { color: #1d4ed8; }
         .dept-toast { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 1500; display: flex; align-items: center; gap: 12px; padding: 0.875rem 1rem 0.875rem 1rem; border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,0.15); max-width: 360px; animation: dept-toast-in 0.3s ease; }
         .dept-toast.success { background: #22c55e; color: #fff; }
         .dept-toast.error { background: #ef4444; color: #fff; }
@@ -672,8 +714,14 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .dept-card-clickable { cursor: pointer; }
         .dept-view-modal-content { max-width: 480px; }
         .dept-view-modal-content .offices-field { margin-bottom: 1rem; }
+        .dept-view-top-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem 1rem; }
+        .dept-view-top-grid .offices-field { margin-bottom: 0; }
         .dept-view-modal-content .view-label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 0.25rem 0; }
         .dept-view-modal-content .view-value { font-size: 1rem; color: #1e293b; margin: 0 0 0.5rem 0; line-height: 1.4; }
+        .dept-view-modal-content .view-flow-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; align-items: stretch; }
+        .dept-view-modal-content .view-flow-item { display: inline-flex; align-items: center; gap: 0.28rem; color: #334155; padding: 0.4rem 0.5rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
+        .dept-view-modal-content .view-flow-item svg { width: 15px; height: 15px; color: #64748b; flex-shrink: 0; }
+        .dept-view-modal-content .view-flow-label { font-weight: 700; color: #1e293b; }
         .dept-view-modal-content .view-value .flow-clickable { color: #2563eb; text-decoration: underline; background: none; border: none; padding: 0; font: inherit; cursor: pointer; }
         .dept-view-modal-content .view-value .flow-clickable:hover { color: #1d4ed8; }
         .dept-view-modal-content .view-value.desc { white-space: pre-wrap; }
@@ -684,8 +732,83 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         .dept-senders-item-time { font-size: 0.8rem; color: #64748b; }
         .dept-senders-item-count { font-size: 0.85rem; color: #475569; font-weight: 600; }
         .dept-senders-empty { font-size: 0.9rem; color: #64748b; margin: 0; }
-        @media (max-width: 1024px) { .dept-cards-grid { grid-template-columns: repeat(2, 1fr); } }
-        @media (max-width: 768px) { .dept-cards-grid { grid-template-columns: 1fr; } .dept-page-header { flex-direction: column; align-items: stretch; } }
+        @media (max-width: 1200px) {
+            .content-header, .content-body { padding-left: 1.3rem; padding-right: 1.3rem; }
+            .dept-cards-grid { grid-template-columns: repeat(2, 1fr); }
+            .dept-page-title { font-size: 1.6rem; }
+            .dept-page-subtitle { font-size: 0.9rem; }
+            .dept-card-name { font-size: 1.02rem; }
+            .dept-card-desc { font-size: 0.84rem; }
+            .dept-card-head-value { font-size: 0.86rem; }
+            .dept-card-flow-stat { font-size: 0.9rem; }
+            .dept-card-flow-stat strong { font-size: 0.95rem; }
+            .dashboard-header .sidebar-toggle-btn.in-header {
+                position: static !important;
+                top: auto !important;
+                right: auto !important;
+                left: auto !important;
+                width: 38px;
+                height: 38px;
+                border-radius: 10px;
+                margin: 0;
+                flex: 0 0 auto;
+                box-shadow: none;
+                background: #1e293b;
+                display: inline-flex;
+            }
+            .dashboard-header .sidebar-toggle-btn.in-header:hover { background: #334155; }
+            .sidebar.sidebar-open ~ .main-content .dashboard-header .sidebar-toggle-btn.in-header {
+                opacity: 0;
+                pointer-events: none;
+            }
+        }
+        @media (max-width: 768px) {
+            .content-header { padding: 1rem; }
+            .content-body { padding: 1rem; }
+            .dashboard-header { flex-wrap: nowrap; align-items: center; gap: 0.7rem; }
+            .dashboard-title-wrap { flex: 1; min-width: 0; gap: 8px; width: auto; }
+            .dept-page-header { margin: 0; width: 100%; }
+            .dept-header-actions { width: auto; justify-content: flex-end; }
+            .dept-page-title { font-size: 1.16rem; }
+            .dept-page-subtitle { font-size: 0.78rem; margin-top: 3px; line-height: 1.25; }
+            .dept-add-btn { height: 42px; padding: 0 0.95rem; }
+            .dept-content-actions { margin-bottom: 0.75rem; }
+            .dept-cards-grid { grid-template-columns: 1fr; gap: 1rem; }
+            .dept-card-header { padding: 1rem 1rem 0.35rem; }
+            .dept-card-content { padding: 0 1rem 1rem; }
+            .dept-card-name { font-size: 0.98rem; }
+            .dept-card-code { font-size: 0.8rem; }
+            .dept-card-desc { font-size: 0.8rem; }
+            .dept-card-head-label { font-size: 0.7rem; }
+            .dept-card-head-value { font-size: 0.82rem; }
+            .dept-card-flow-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .dept-card-flow-stat { font-size: 0.85rem; }
+            .dept-card-flow-stat strong { font-size: 0.9rem; }
+            .dept-view-top-grid { grid-template-columns: 1fr; }
+            .dept-view-modal-content .view-flow-row { grid-template-columns: 1fr; }
+            .offices-modal-content { padding: 1.15rem 1rem; }
+        }
+        @media (max-width: 640px) {
+            .dept-page-title { font-size: 1.1rem; }
+            .dept-page-subtitle { margin-top: 2px; font-size: 0.76rem; line-height: 1.2; }
+            .dept-header-actions { gap: 8px; }
+            .dept-content-actions { justify-content: flex-end; }
+            .dept-add-btn { width: auto; justify-content: center; min-width: 0; padding: 0 0.85rem; height: 38px; font-size: 0.86rem; }
+            .dept-search-row { flex-direction: row; border-radius: 10px; overflow: hidden; }
+            .dept-filter-btn { width: auto; border-left: 1px solid rgba(255,255,255,0.08); border-top: none; border-radius: 0; justify-content: center; padding: 0 14px; font-size: 0.9rem; }
+            .dept-search { height: 42px; }
+            .dept-filter-btn { height: 42px; }
+        }
+        @media (max-width: 420px) {
+            .content-header { padding: 0.85rem 0.7rem; }
+            .dept-page-subtitle { display: none; }
+            .dept-card-flow-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 0.45rem; row-gap: 0.4rem; }
+            .dept-card-flow-stat { font-size: 0.78rem; padding: 0.35rem 0.42rem; min-height: 32px; gap: 0.2rem; }
+            .dept-card-flow-stat strong { font-size: 0.8rem; }
+            .dept-card-flow-stat svg { width: 12px; height: 12px; }
+            .dept-page-title-icon { width: 34px; height: 34px; border-radius: 9px; }
+            .dept-page-title-icon svg { width: 20px; height: 20px; }
+        }
     </style>
 </head>
 <body>
@@ -695,14 +818,20 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         <div class="main-content">
             <div class="content-header">
                 <div class="dashboard-header">
+                    <div class="dashboard-title-wrap">
                     <div class="dept-page-header" style="flex: 1; margin-bottom: 0;">
                         <div>
-                            <h1 class="dept-page-title">Departments</h1>
+                            <div class="dept-page-title-row">
+                                <span class="dept-page-title-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M4 21V7l8-4 8 4v14"/><path d="M9 21v-6h6v6"/><path d="M9 10h.01"/><path d="M15 10h.01"/></svg>
+                                </span>
+                                <h1 class="dept-page-title">Departments</h1>
+                            </div>
                             <p class="dept-page-subtitle">Manage municipal departments and their heads</p>
                         </div>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
-                        <button type="button" class="dept-add-btn" onclick="openAddModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Add Department</button>
+                    </div>
+                    <div class="dept-header-actions">
                         <div class="header-controls">
                             <?php include __DIR__ . '/_notif_dropdown_super_admin.php'; ?>
                         </div>
@@ -723,6 +852,9 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                     <span class="dept-toast-text"><?= htmlspecialchars($msg) ?></span>
                 </div>
                 <?php endif; ?>
+                <div class="dept-content-actions">
+                    <button type="button" class="dept-add-btn" onclick="openAddModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Add Department</button>
+                </div>
 
                 <form method="get" id="dept-search-form" class="dept-search-row">
                     <div class="dept-search-wrap">
@@ -750,9 +882,10 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                         $descDisplay = $desc !== '' ? $desc : 'Municipal department';
                         $receivedCount = (int)($officeDocStats['received_by_office'][$officeId] ?? 0);
                         $sentCount = $headId !== '' ? (int)($officeDocStats['sent_by_head'][$headId] ?? 0) : 0;
+                        $pendingCount = (int)($officeDocStats['pending_by_office'][$officeId] ?? 0);
                         $archivedCount = $headId !== '' ? (int)($officeDocStats['archived_by_head'][$headId] ?? 0) : 0;
                     ?>
-                    <article class="dept-card dept-card-clickable" data-office-id="<?= htmlspecialchars($officeId) ?>" data-name="<?= htmlspecialchars($o['office_name'] ?? '') ?>" data-code="<?= htmlspecialchars($o['office_code'] ?? '') ?>" data-desc="<?= htmlspecialchars($descDisplay) ?>" data-head="<?= htmlspecialchars($head !== '' ? $head : 'Not assigned') ?>" data-sent="<?= (int)$sentCount ?>" data-received="<?= (int)$receivedCount ?>" data-archived="<?= (int)$archivedCount ?>" data-created="<?= htmlspecialchars($createdAt) ?>" onclick="openViewModalFromCard(this)">
+                    <article class="dept-card dept-card-clickable" data-office-id="<?= htmlspecialchars($officeId) ?>" data-name="<?= htmlspecialchars($o['office_name'] ?? '') ?>" data-code="<?= htmlspecialchars($o['office_code'] ?? '') ?>" data-desc="<?= htmlspecialchars($descDisplay) ?>" data-head="<?= htmlspecialchars($head !== '' ? $head : 'Not assigned') ?>" data-sent="<?= (int)$sentCount ?>" data-received="<?= (int)$receivedCount ?>" data-pending="<?= (int)$pendingCount ?>" data-archived="<?= (int)$archivedCount ?>" data-created="<?= htmlspecialchars($createdAt) ?>" onclick="openViewModalFromCard(this)">
                         <div class="dept-card-header">
                             <div class="dept-card-header-left">
                                 <div class="dept-card-icon">
@@ -780,9 +913,10 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                                 <p class="dept-card-head-label">Department Head</p>
                                 <p class="dept-card-head-value <?= $head === '' ? 'not-assigned' : '' ?>"><?= $head !== '' ? htmlspecialchars($head) : 'Not assigned' ?></p>
                                 <div class="dept-card-flow-stats">
-                                    <p class="dept-card-flow-stat"><strong>Sent:</strong> <?= (int)$sentCount ?></p>
-                                    <p class="dept-card-flow-stat"><strong>Received:</strong> <?= (int)$receivedCount ?></p>
-                                    <p class="dept-card-flow-stat"><strong>Archived:</strong> <?= (int)$archivedCount ?></p>
+                                    <p class="dept-card-flow-stat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22 11 13 2 9 22 2z"/></svg><strong>Sent:</strong> <?= (int)$sentCount ?></p>
+                                    <p class="dept-card-flow-stat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-8"/><path d="m15 5-7 7 7 7"/><rect x="2" y="5" width="6" height="14" rx="1"/></svg><strong>Received:</strong> <?= (int)$receivedCount ?></p>
+                                    <p class="dept-card-flow-stat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><strong>Pending:</strong> <?= (int)$pendingCount ?></p>
+                                    <p class="dept-card-flow-stat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5" rx="1"/><line x1="10" y1="12" x2="14" y2="12"/></svg><strong>Archived:</strong> <?= (int)$archivedCount ?></p>
                                 </div>
                             </div>
                             <div class="dept-card-created-section">
@@ -802,25 +936,27 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                     <button type="button" class="offices-modal-close" onclick="closeViewModal()" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg></button>
                     <h3 id="view-modal-title">Department Details</h3>
                     <p class="offices-modal-subtitle">View department information.</p>
-                    <div class="offices-field">
-                        <p class="view-label">Department Name</p>
-                        <p class="view-value" id="view-name">—</p>
-                    </div>
-                    <div class="offices-field">
-                        <p class="view-label">Department Code</p>
-                        <p class="view-value" id="view-code">—</p>
-                    </div>
-                    <div class="offices-field">
-                        <p class="view-label">Description</p>
-                        <p class="view-value desc" id="view-desc">—</p>
-                    </div>
-                    <div class="offices-field">
-                        <p class="view-label">Department Head</p>
-                        <p class="view-value" id="view-head">—</p>
+                    <div class="dept-view-top-grid">
+                        <div class="offices-field">
+                            <p class="view-label">Department Name</p>
+                            <p class="view-value" id="view-name">—</p>
+                        </div>
+                        <div class="offices-field">
+                            <p class="view-label">Department Code</p>
+                            <p class="view-value" id="view-code">—</p>
+                        </div>
+                        <div class="offices-field">
+                            <p class="view-label">Description</p>
+                            <p class="view-value desc" id="view-desc">—</p>
+                        </div>
+                        <div class="offices-field">
+                            <p class="view-label">Department Head</p>
+                            <p class="view-value" id="view-head">—</p>
+                        </div>
                     </div>
                     <div class="offices-field">
                         <p class="view-label">Document Flow</p>
-                        <p class="view-value view-flow-value" id="view-flow-top">Sent: 0 | Received: 0 | Archived: 0</p>
+                        <p class="view-value view-flow-value" id="view-flow-top">Sent: 0 | Received: 0 | Pending: 0 | Archived: 0</p>
                     </div>
                     <div class="offices-field">
                         <p class="view-label">Created</p>
@@ -946,15 +1082,60 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
             var receivedSendersByOffice = <?= $receivedSendersByOfficeJson ?>;
             var sentRecipientsByOffice = <?= $sentRecipientsByOfficeJson ?>;
             (function(){
+                var searchForm = document.getElementById('dept-search-form');
                 var searchInput = document.querySelector('.dept-search');
-                if (searchInput) {
-                    searchInput.addEventListener('keypress', function(e) {
-                        if (e.key === 'Enter') {
-                            e.preventDefault();
-                            document.getElementById('dept-search-form').submit();
+                var cardsGrid = document.getElementById('dept-cards-grid');
+                var cards = cardsGrid ? Array.prototype.slice.call(cardsGrid.querySelectorAll('.dept-card')) : [];
+                if (!searchInput || !cardsGrid || cards.length === 0) return;
+
+                var emptyState = document.createElement('p');
+                emptyState.className = 'dept-empty dept-empty-live';
+                emptyState.id = 'dept-live-empty';
+                emptyState.style.gridColumn = '1 / -1';
+                emptyState.style.display = 'none';
+                emptyState.innerHTML =
+                    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="8.5" y1="11" x2="13.5" y2="11"></line></svg>'
+                    + '<span>No departments match your search. <a href="#" class="dept-empty-add-link" id="dept-empty-add-link">Add department here</a>.</span>';
+                cardsGrid.appendChild(emptyState);
+                emptyState.addEventListener('click', function(e) {
+                    var addLink = e.target && e.target.closest ? e.target.closest('.dept-empty-add-link') : null;
+                    if (!addLink) return;
+                    e.preventDefault();
+                    if (typeof openAddModal === 'function') openAddModal();
+                });
+
+                function applyLiveFilter() {
+                    var q = String(searchInput.value || '').toLowerCase().trim();
+                    var terms = q === '' ? [] : q.split(/\s+/).filter(Boolean);
+                    var visibleCount = 0;
+                    cards.forEach(function(card) {
+                        var d = card.dataset || {};
+                        var haystack = [
+                            d.name || '',
+                            d.code || '',
+                            d.desc || '',
+                            d.head || ''
+                        ].join(' ').toLowerCase();
+                        var matched = terms.every(function(term) {
+                            return haystack.indexOf(term) !== -1;
+                        });
+                        card.style.display = matched ? '' : 'none';
+                        if (matched) visibleCount++;
+                    });
+                    emptyState.style.display = visibleCount === 0 ? '' : 'none';
+                }
+
+                searchInput.addEventListener('input', applyLiveFilter);
+                if (searchForm) {
+                    searchForm.addEventListener('submit', function(e) {
+                        e.preventDefault();
+                        applyLiveFilter();
+                        if (searchInput && document.activeElement !== searchInput) {
+                            searchInput.focus();
                         }
                     });
                 }
+                applyLiveFilter();
             })();
             function openAddModal() { document.getElementById('modal-add').style.display = 'flex'; }
             function closeAddModal() { document.getElementById('modal-add').style.display = 'none'; }
@@ -968,10 +1149,27 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
                 document.getElementById('view-head').textContent = d.head || '—';
                 var sent = Number(d.sent || 0);
                 var received = Number(d.received || 0);
+                var pending = Number(d.pending || 0);
                 var archived = Number(d.archived || 0);
-                document.getElementById('view-flow-top').innerHTML = 'Sent: <button type="button" class="flow-clickable" onclick="openSentRecipientsModal()">' + sent + '</button>'
-                    + ' | Received: <button type="button" class="flow-clickable" onclick="openReceivedSendersModal()">' + received + '</button>'
-                    + ' | Archived: ' + archived;
+                document.getElementById('view-flow-top').innerHTML =
+                    '<span class="view-flow-row">'
+                    + '<span class="view-flow-item">'
+                    + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22 11 13 2 9 22 2z"/></svg>'
+                    + '<span class="view-flow-label">Sent:</span> <button type="button" class="flow-clickable" onclick="openSentRecipientsModal()">' + sent + '</button>'
+                    + '</span>'
+                    + '<span class="view-flow-item">'
+                    + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-8"/><path d="m15 5-7 7 7 7"/><rect x="2" y="5" width="6" height="14" rx="1"/></svg>'
+                    + '<span class="view-flow-label">Received:</span> <button type="button" class="flow-clickable" onclick="openReceivedSendersModal()">' + received + '</button>'
+                    + '</span>'
+                    + '<span class="view-flow-item">'
+                    + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
+                    + '<span class="view-flow-label">Pending:</span> ' + pending
+                    + '</span>'
+                    + '<span class="view-flow-item">'
+                    + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5" rx="1"/><line x1="10" y1="12" x2="14" y2="12"/></svg>'
+                    + '<span class="view-flow-label">Archived:</span> ' + archived
+                    + '</span>'
+                    + '</span>';
                 document.getElementById('view-created').textContent = d.created || '—';
                 document.getElementById('modal-view').style.display = 'flex';
             }
@@ -1260,7 +1458,8 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         <input type="hidden" name="action" value="delete">
         <input type="hidden" name="office_id" id="delete-office-id">
     </form>
-<script src="assets/js/sidebar_super_admin.js"></script>
+<?php $sidebarJsVer = @filemtime(__DIR__ . '/assets/js/sidebar_super_admin.js') ?: time(); ?>
+<script src="assets/js/sidebar_super_admin.js?v=<?= (int)$sidebarJsVer ?>"></script>
 <?php $notifJsVer = @filemtime(__DIR__ . '/assets/js/super_admin_notifications.js') ?: time(); ?>
 <script src="assets/js/super_admin_notifications.js?v=<?= (int)$notifJsVer ?>"></script>
 <script>
@@ -1361,6 +1560,14 @@ $userSignature = isset($_SESSION['user_signature']) ? $_SESSION['user_signature'
         r.onload = function(){ hiddenInput.value = r.result; form.submit(); };
         r.readAsDataURL(fileInput.files[0]);
     });
+})();
+(function(){
+    var dashboardTitleWrap = document.querySelector('.dashboard-title-wrap');
+    var sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+    if (dashboardTitleWrap && sidebarToggleBtn && !dashboardTitleWrap.contains(sidebarToggleBtn)) {
+        sidebarToggleBtn.classList.add('in-header');
+        dashboardTitleWrap.insertBefore(sidebarToggleBtn, dashboardTitleWrap.firstChild);
+    }
 })();
 </script>
         </div>
