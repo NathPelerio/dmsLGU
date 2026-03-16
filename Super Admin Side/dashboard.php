@@ -77,9 +77,7 @@ try {
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         /* Same font as sidebar: Inter for full dashboard consistency */
-        body, .dashboard-container, .main-content {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Open Sans', sans-serif;
-        }
+        body, .dashboard-container, .main-content { font-family: var(--font-sans); }
         body { margin: 0; background: #f8fafc; color: #0f172a; }
         .main-content { display: flex; flex-direction: column; background: #fff; min-height: 0; flex: 1; }
         .main-content .admin-content-header-row { flex-shrink: 0; }
@@ -114,6 +112,216 @@ try {
             padding: 4px 7px;
             border-radius: 999px;
         }
+        .dashboard-metrics {
+            position: relative;
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            border: 1px solid #dbe3ef;
+            border-radius: 14px;
+            overflow: hidden;
+            background: #ffffff;
+            margin-bottom: 18px;
+        }
+        .dashboard-metrics::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            z-index: 3;
+            pointer-events: none;
+            background: linear-gradient(
+                to right,
+                #65a30d 0 25%,
+                #c47a10 25% 50%,
+                #2563eb 50% 75%,
+                #0f766e 75% 100%
+            );
+        }
+        .metrics-segment {
+            position: relative;
+            padding: 14px 20px 12px;
+            min-height: 184px;
+            display: flex;
+            flex-direction: column;
+            background: #fff;
+        }
+        .metrics-segment:not(:last-child)::after {
+            content: '';
+            position: absolute;
+            top: 3px;
+            right: 0;
+            bottom: 0;
+            width: 1px;
+            background: #e2e8f0;
+        }
+        .metrics-segment-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .metrics-segment-title {
+            margin: 0;
+            font-size: 22px;
+            line-height: 1;
+            font-weight: 500;
+            letter-spacing: 0.07em;
+            color: #475569;
+            text-transform: uppercase;
+        }
+        .metrics-segment-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 5px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            line-height: 1;
+            font-weight: 600;
+            color: var(--segment-accent, #64748b);
+            background: var(--segment-soft, #f1f5f9);
+            border: 1px solid var(--segment-border, #cbd5e1);
+            white-space: nowrap;
+        }
+        .metrics-segment-value {
+            margin: 0;
+            font-size: 36px;
+            line-height: 1.05;
+            font-weight: 700;
+            color: var(--segment-value, var(--segment-accent, #0f172a));
+        }
+        .metrics-segment-sub {
+            margin: 6px 0 0;
+            font-size: 14px;
+            color: #475569;
+        }
+        .metrics-segment-spark {
+            margin-top: auto;
+            display: flex;
+            align-items: flex-end;
+            gap: 4px;
+            min-height: 38px;
+            padding-top: 10px;
+        }
+        .metrics-segment-spark span {
+            width: 32px;
+            max-width: 100%;
+            border-radius: 2px 2px 0 0;
+            background: color-mix(in srgb, var(--segment-accent, #64748b) 24%, transparent);
+        }
+        .metrics-segment-spark span:nth-child(1) { height: 8px; }
+        .metrics-segment-spark span:nth-child(2) { height: 13px; }
+        .metrics-segment-spark span:nth-child(3) { height: 18px; }
+        .metrics-segment-spark span:nth-child(4) { height: 24px; }
+        .metrics-segment-spark span:nth-child(5) {
+            height: 32px;
+            background: var(--segment-accent, #64748b);
+        }
+        .metrics-segment.is-zero .metrics-segment-spark span {
+            height: 4px;
+            background: color-mix(in srgb, var(--segment-accent, #64748b) 35%, transparent);
+        }
+        .metrics-segment-total {
+            --segment-accent: #65a30d;
+            --segment-soft: #ecfccb;
+            --segment-border: #bbf7d0;
+            --segment-value: #0f172a;
+        }
+        .metrics-segment-pending {
+            --segment-accent: #c47a10;
+            --segment-soft: #fef3c7;
+            --segment-border: #fde68a;
+        }
+        .metrics-segment-approved {
+            --segment-accent: #2563eb;
+            --segment-soft: #dbeafe;
+            --segment-border: #bfdbfe;
+        }
+        .metrics-segment-completed {
+            --segment-accent: #0f766e;
+            --segment-soft: #ccfbf1;
+            --segment-border: #99f6e4;
+        }
+        .status-breakdown-card {
+            border: 1px solid #e2e8f0 !important;
+            box-shadow: none !important;
+            background: #ffffff !important;
+            border-radius: 14px;
+            padding: 18px 20px !important;
+        }
+        .status-breakdown-card .card-title { margin-bottom: 12px; }
+        .status-chart-wrap {
+            position: relative;
+            width: 140px;
+            height: 140px;
+            margin: 0 auto;
+        }
+        .status-chart-wrap canvas {
+            width: 140px !important;
+            height: 140px !important;
+        }
+        .status-center-label {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+            text-align: center;
+        }
+        .status-center-value {
+            font-size: 22px;
+            line-height: 1;
+            font-weight: 700;
+            color: #0f172a;
+        }
+        .status-center-text {
+            margin-top: 3px;
+            font-size: 14px;
+            color: #64748b;
+            text-transform: lowercase;
+            letter-spacing: .01em;
+        }
+        .status-legend {
+            margin-top: 16px;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            column-gap: 18px;
+            row-gap: 8px;
+        }
+        .status-legend-item {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            align-items: center;
+            column-gap: 8px;
+            min-width: 0;
+            font-size: 14px;
+            color: #334155;
+        }
+        .status-legend-swatch {
+            width: 11px;
+            height: 11px;
+            border-radius: 3px;
+            flex-shrink: 0;
+        }
+        .status-legend-name {
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .status-legend-value {
+            justify-self: end;
+            font-weight: 600;
+        }
+        .status-legend-value-archived { color: #639922; }
+        .status-legend-value-pending { color: #EF9F27; }
+        .status-legend-value-approved { color: #378ADD; }
+        .status-legend-value-completed { color: #1D9E75; }
 
         /* Force mobile sidebar behavior directly on this page */
         @media (max-width: 1400px), (hover: none) and (pointer: coarse) {
@@ -149,6 +357,29 @@ try {
                 max-width: 100% !important;
             }
         }
+        @media (max-width: 1180px) {
+            .dashboard-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .metrics-segment::after { display: none; }
+            .metrics-segment:nth-child(2n+1):not(:last-child)::after {
+                content: '';
+                position: absolute;
+                top: 3px;
+                right: 0;
+                bottom: 0;
+                width: 1px;
+                background: #e2e8f0;
+            }
+            .metrics-segment:nth-child(-n+2) { border-bottom: 1px solid #e2e8f0; }
+        }
+        @media (max-width: 700px) {
+            .dashboard-metrics { grid-template-columns: 1fr; }
+            .metrics-segment { border-bottom: 1px solid #e2e8f0; }
+            .metrics-segment::after { display: none !important; }
+            .metrics-segment:last-child { border-bottom: none; }
+            .metrics-segment-title { font-size: 18px; }
+            .metrics-segment-value { font-size: 34px; }
+            .metrics-segment-sub { font-size: 14px; }
+        }
     </style>
 </head>
 <body>
@@ -172,25 +403,49 @@ try {
                 </div>
                 <div class="admin-content-body" id="admin-content-body">
                     <div class="dashboard-metrics">
-                        <div class="metric-card">
-                            <span class="metric-label">TOTAL DOCUMENTS</span>
-                            <span class="metric-value"><?php echo (int)$totalDocuments; ?></span>
-                            <svg class="metric-icon metric-icon-doc" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+                        <div class="metrics-segment metrics-segment-total<?= ((int)$totalDocuments <= 0) ? ' is-zero' : '' ?>">
+                            <div class="metrics-segment-head">
+                                <h2 class="metrics-segment-title">TOTAL DOCS</h2>
+                                <span class="metrics-segment-badge">All time</span>
+                            </div>
+                            <p class="metrics-segment-value"><?php echo (int)$totalDocuments; ?></p>
+                            <p class="metrics-segment-sub">documents on record</p>
+                            <div class="metrics-segment-spark" aria-hidden="true">
+                                <span></span><span></span><span></span><span></span><span></span>
+                            </div>
                         </div>
-                        <div class="metric-card">
-                            <span class="metric-label">PENDING</span>
-                            <span class="metric-value"><?php echo (int)$pendingCount; ?></span>
-                            <svg class="metric-icon metric-icon-pending" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        <div class="metrics-segment metrics-segment-pending<?= ((int)$pendingCount <= 0) ? ' is-zero' : '' ?>">
+                            <div class="metrics-segment-head">
+                                <h2 class="metrics-segment-title">PENDING</h2>
+                                <span class="metrics-segment-badge">Review</span>
+                            </div>
+                            <p class="metrics-segment-value"><?php echo (int)$pendingCount; ?></p>
+                            <p class="metrics-segment-sub">awaiting action</p>
+                            <div class="metrics-segment-spark" aria-hidden="true">
+                                <span></span><span></span><span></span><span></span><span></span>
+                            </div>
                         </div>
-                        <div class="metric-card">
-                            <span class="metric-label">APPROVED</span>
-                            <span class="metric-value"><?php echo (int)$approvedCount; ?></span>
-                            <svg class="metric-icon metric-icon-approved" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                        <div class="metrics-segment metrics-segment-approved<?= ((int)$approvedCount <= 0) ? ' is-zero' : '' ?>">
+                            <div class="metrics-segment-head">
+                                <h2 class="metrics-segment-title">APPROVED</h2>
+                                <span class="metrics-segment-badge">Cleared</span>
+                            </div>
+                            <p class="metrics-segment-value"><?php echo (int)$approvedCount; ?></p>
+                            <p class="metrics-segment-sub">ready for release</p>
+                            <div class="metrics-segment-spark" aria-hidden="true">
+                                <span></span><span></span><span></span><span></span><span></span>
+                            </div>
                         </div>
-                        <div class="metric-card">
-                            <span class="metric-label">COMPLETED</span>
-                            <span class="metric-value"><?php echo (int)$completedCount; ?></span>
-                            <svg class="metric-icon metric-icon-completed" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                        <div class="metrics-segment metrics-segment-completed<?= ((int)$completedCount <= 0) ? ' is-zero' : '' ?>">
+                            <div class="metrics-segment-head">
+                                <h2 class="metrics-segment-title">COMPLETED</h2>
+                                <span class="metrics-segment-badge">Done</span>
+                            </div>
+                            <p class="metrics-segment-value"><?php echo (int)$completedCount; ?></p>
+                            <p class="metrics-segment-sub">fully processed</p>
+                            <div class="metrics-segment-spark" aria-hidden="true">
+                                <span></span><span></span><span></span><span></span><span></span>
+                            </div>
                         </div>
                     </div>
 
@@ -206,15 +461,55 @@ try {
                                 <p class="tasks-empty-sub">No pending tasks at the moment</p>
                             </div>
                         </div>
+                        <?php
+                            $chartArchived = (int)($statusBreakdown['Archived'] ?? 0);
+                            $chartPendingAdmin = (int)$pendingCount;
+                            $chartApproved = (int)$approvedCount;
+                            $chartCompleted = (int)$completedCount;
+                            $chartTotal = (int)$totalDocuments;
+                            $chartSeriesTotal = $chartArchived + $chartPendingAdmin + $chartApproved + $chartCompleted;
+                            if ($chartTotal > 0 && $chartSeriesTotal === 0) {
+                                // Keep colored donut state when total exists but category mapping yields zero.
+                                $chartPendingAdmin = $chartTotal;
+                                $chartSeriesTotal = $chartTotal;
+                            }
+                            $chartHasSeriesData = $chartSeriesTotal > 0;
+                            $percentDenominator = $chartTotal > 0 ? $chartTotal : $chartSeriesTotal;
+                            $pctArchived = $percentDenominator > 0 ? (int)round(($chartArchived / $percentDenominator) * 100) : 0;
+                            $pctPending = $percentDenominator > 0 ? (int)round(($chartPendingAdmin / $percentDenominator) * 100) : 0;
+                            $pctApproved = $percentDenominator > 0 ? (int)round(($chartApproved / $percentDenominator) * 100) : 0;
+                            $pctCompleted = $percentDenominator > 0 ? (int)round(($chartCompleted / $percentDenominator) * 100) : 0;
+                        ?>
                         <div class="dashboard-card status-breakdown-card">
                             <h3 class="card-title">Status Breakdown</h3>
                             <div class="status-chart-wrap">
-                                <canvas id="chart-status-breakdown" width="280" height="280"></canvas>
+                                <canvas id="chart-status-breakdown" width="140" height="140"></canvas>
+                                <div class="status-center-label" aria-hidden="true">
+                                    <span class="status-center-value"><?= (int)$chartTotal ?></span>
+                                    <span class="status-center-text">total</span>
+                                </div>
                             </div>
                             <div class="status-legend">
-                                <span class="legend-item"><i class="legend-dot" style="background:#2563eb"></i> Archived</span>
-                                <span class="legend-item"><i class="legend-dot" style="background:#ea580c"></i> Pending Admin</span>
-                                <span class="legend-item"><i class="legend-dot" style="background:#16a34a"></i> Pending Department</span>
+                                <div class="status-legend-item">
+                                    <span class="status-legend-swatch" style="background:#639922"></span>
+                                    <span class="status-legend-name">Archived</span>
+                                    <span class="status-legend-value status-legend-value-archived"><?= (int)$pctArchived ?>%</span>
+                                </div>
+                                <div class="status-legend-item">
+                                    <span class="status-legend-swatch" style="background:#EF9F27"></span>
+                                    <span class="status-legend-name">Pending admin</span>
+                                    <span class="status-legend-value status-legend-value-pending"><?= (int)$pctPending ?>%</span>
+                                </div>
+                                <div class="status-legend-item">
+                                    <span class="status-legend-swatch" style="background:#378ADD"></span>
+                                    <span class="status-legend-name">Approved</span>
+                                    <span class="status-legend-value status-legend-value-approved"><?= (int)$pctApproved ?>%</span>
+                                </div>
+                                <div class="status-legend-item">
+                                    <span class="status-legend-swatch" style="background:#1D9E75"></span>
+                                    <span class="status-legend-name">Completed</span>
+                                    <span class="status-legend-value status-legend-value-completed"><?= (int)$pctCompleted ?>%</span>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -323,15 +618,25 @@ try {
             });
         }
 
-        var statusData = {
-            labels: ['Archived', 'Pending Admin', 'Pending Department'],
-            datasets: [{
-                data: [<?php echo (int)($statusBreakdown['Archived'] ?? 0); ?>, <?php echo (int)($statusBreakdown['Pending Admin'] ?? 0); ?>, <?php echo (int)($statusBreakdown['Pending Department'] ?? 0); ?>],
-                backgroundColor: ['#2563eb', '#ea580c', '#16a34a'],
-                borderWidth: 0,
-                hoverOffset: 4
-            }]
-        };
+        var statusData = <?= $chartHasSeriesData ? json_encode([
+            'labels' => ['Archived', 'Pending admin', 'Approved', 'Completed'],
+            'datasets' => [[
+                'data' => [(int)$chartArchived, (int)$chartPendingAdmin, (int)$chartApproved, (int)$chartCompleted],
+                'backgroundColor' => ['#639922', '#EF9F27', '#378ADD', '#1D9E75'],
+                'borderColor' => '#ffffff',
+                'borderWidth' => 2,
+                'hoverOffset' => 2,
+            ]],
+        ], JSON_UNESCAPED_SLASHES) : json_encode([
+            'labels' => ['No categorized data'],
+            'datasets' => [[
+                'data' => [1],
+                'backgroundColor' => ['#e2e8f0'],
+                'borderColor' => '#ffffff',
+                'borderWidth' => 2,
+                'hoverOffset' => 0,
+            ]],
+        ], JSON_UNESCAPED_SLASHES) ?>;
         var statusCtx = document.getElementById('chart-status-breakdown');
         if (statusCtx && typeof Chart !== 'undefined') {
             new Chart(statusCtx, {
@@ -340,12 +645,15 @@ try {
                 options: {
                     responsive: true,
                     maintainAspectRatio: true,
-                    cutout: '60%',
+                    cutout: '70%',
                     plugins: {
                         legend: { display: false },
                         tooltip: {
                             callbacks: {
                                 label: function(ctx) {
+                                    if (!<?= $chartHasSeriesData ? 'true' : 'false' ?>) {
+                                        return 'No categorized data';
+                                    }
                                     var total = ctx.dataset.data.reduce(function(a, b) { return a + b; }, 0);
                                     var pct = total ? ((ctx.raw / total) * 100).toFixed(1) : 0;
                                     return ctx.label + ': ' + ctx.raw + ' (' + pct + '%)';
