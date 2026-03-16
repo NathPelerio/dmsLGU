@@ -70,7 +70,8 @@ try {
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="assets/css/styles.css">
     <link rel="stylesheet" href="../Admin%20Side/assets/css/admin-dashboard.css">
-    <link rel="stylesheet" href="assets/css/sidebar_super_admin.css">
+    <?php $sidebarCssVer = @filemtime(__DIR__ . '/assets/css/sidebar_super_admin.css') ?: time(); ?>
+    <link rel="stylesheet" href="assets/css/sidebar_super_admin.css?v=<?= (int)$sidebarCssVer ?>">
     <?php $profileModalCssVer = @filemtime(__DIR__ . '/assets/css/profile_modal_super_admin.css') ?: time(); ?>
     <link rel="stylesheet" href="assets/css/profile_modal_super_admin.css?v=<?= (int)$profileModalCssVer ?>">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -112,6 +113,41 @@ try {
             line-height: 1;
             padding: 4px 7px;
             border-radius: 999px;
+        }
+
+        /* Force mobile sidebar behavior directly on this page */
+        @media (max-width: 1400px), (hover: none) and (pointer: coarse) {
+            .dashboard-container {
+                overflow-x: hidden;
+            }
+
+            .sidebar-toggle-btn {
+                display: inline-flex !important;
+                position: fixed !important;
+                top: 10px !important;
+                right: 10px !important;
+                z-index: 2000 !important;
+            }
+
+            .sidebar {
+                transform: translateX(-100%) !important;
+                transition: transform 0.24s ease !important;
+                z-index: 1900 !important;
+            }
+
+            .sidebar.sidebar-open {
+                transform: translateX(0) !important;
+            }
+
+            .sidebar-mobile-overlay.show {
+                display: block !important;
+            }
+
+            .main-content {
+                margin-left: 0 !important;
+                width: 100% !important;
+                max-width: 100% !important;
+            }
         }
     </style>
 </head>
@@ -242,7 +278,8 @@ try {
     </div>
 
     <?php include __DIR__ . '/_profile_modal_super_admin.php'; ?>
-    <script src="assets/js/sidebar_super_admin.js"></script>
+    <?php $sidebarJsVer = @filemtime(__DIR__ . '/assets/js/sidebar_super_admin.js') ?: time(); ?>
+    <script src="assets/js/sidebar_super_admin.js?v=<?= (int)$sidebarJsVer ?>"></script>
     <?php $notifJsVer = @filemtime(__DIR__ . '/assets/js/super_admin_notifications.js') ?: time(); ?>
     <script src="assets/js/super_admin_notifications.js?v=<?= (int)$notifJsVer ?>"></script>
     <script>

@@ -141,3 +141,147 @@ if (!function_exists('dbSuspendRemainingSeconds')) {
         return null;
     }
 }
+
+if (!function_exists('dbAutoActivityModule')) {
+    function dbAutoActivityModule($scriptPath) {
+        $script = str_replace('\\', '/', (string)$scriptPath);
+        $parts = array_values(array_filter(explode('/', trim($script, '/'))));
+        if (count($parts) >= 2) {
+            $folder = strtolower(trim((string)$parts[count($parts) - 2]));
+            if ($folder !== '') {
+                $folder = preg_replace('/\s+/', '_', $folder) ?: $folder;
+                return $folder;
+            }
+        }
+        return 'app';
+    }
+}
+
+if (!function_exists('dbAutoActivityRegister')) {
+    /**
+     * Auto-log authenticated request activity once per request.
+     * This acts as a safety net so actions are captured across modules.
+     */
+    function dbAutoActivityRegister() {
+        static $registered = false;
+        if ($registered) {
+            return;
+        }
+        $registered = true;
+
+        register_shutdown_function(function () {
+            if (PHP_SAPI === 'cli') {
+                return;
+            }
+            if (!empty($GLOBALS['__activity_log_written'])) {
+                return;
+            }
+            if (!function_exists('session_status') || session_status() !== PHP_SESSION_ACTIVE) {
+                return;
+            }
+            $actorId = trim((string)($_SESSION['user_id'] ?? ''));
+            if ($actorId === '') {
+                return;
+            }
+
+            $method = strtoupper(trim((string)($_SERVER['REQUEST_METHOD'] ?? 'GET')));
+            if ($method === '') {
+                $method = 'GET';
+            }
+            if ($method === 'GET') {
+                return;
+            }
+            $requestActionRaw = trim((string)($_POST['action'] ?? $_GET['action'] ?? ''));
+            if ($requestActionRaw === '') {
+                return;
+            }
+            $requestAction = strtolower(trim(preg_replace('/[^a-z0-9_]+/', '_', $requestActionRaw) ?? ''));
+            if ($requestAction === '') {
+                return;
+            }
+            foreach (['verify_', 'send_', 'mark_', 'fetch_', 'get_'] as $skipPrefix) {
+                if (str_starts_with($requestAction, $skipPrefix)) {
+                    return;
+                }
+            }
+            $requestUri = trim((string)($_SERVER['REQUEST_URI'] ?? ''));
+            $scriptName = trim((string)($_SERVER['SCRIPT_NAME'] ?? ''));
+            $statusCode = (int)http_response_code();
+            if ($statusCode <= 0) {
+                $statusCode = 200;
+            }
+
+            $status = 'success';
+            if ($statusCode >= 500) {
+                $status = 'error';
+            } elseif ($statusCode >= 400) {
+                $status = 'failed';
+            }
+
+            $action = $requestAction;
+            $details = [
+                'module' => dbAutoActivityModule($scriptName),
+                'request_uri' => $requestUri,
+                'script_name' => $scriptName,
+                'http_method' => $method,
+                'http_status' => (string)$statusCode,
+            ];
+
+            try {
+                $pdo = dbPdo();
+                $cols = [];
+                foreach ($pdo->query('SHOW COLUMNS FROM activity_logs') as $row) {
+                    $cols[strtolower((string)($row['Field'] ?? ''))] = true;
+                }
+                $hasModern = isset($cols['actor_id']) && isset($cols['actor_name']) && isset($cols['status']) && isset($cols['module']);
+                if ($hasModern) {
+                    $stmt = $pdo->prepare(
+                        'INSERT INTO activity_logs
+                            (action, status, module, details, actor_id, actor_name, actor_email, actor_role, ip_address, user_agent, created_at)
+                         VALUES
+                            (:action, :status, :module, :details, :actor_id, :actor_name, :actor_email, :actor_role, :ip_address, :user_agent, :created_at)'
+                    );
+                    $stmt->execute([
+                        ':action' => $action,
+                        ':status' => $status,
+                        ':module' => (string)$details['module'],
+                        ':details' => json_encode($details, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                        ':actor_id' => $actorId,
+                        ':actor_name' => trim((string)($_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'Unknown')),
+                        ':actor_email' => trim((string)($_SESSION['user_email'] ?? '')),
+                        ':actor_role' => strtolower(trim((string)($_SESSION['user_role'] ?? 'guest'))),
+                        ':ip_address' => trim((string)($_SERVER['REMOTE_ADDR'] ?? '')),
+                        ':user_agent' => trim((string)($_SERVER['HTTP_USER_AGENT'] ?? '')),
+                        ':created_at' => dbNowUtcString(),
+                    ]);
+                } else {
+                    $actorIdInt = ctype_digit($actorId) ? (int)$actorId : null;
+                    $legacyPayload = [
+                        'status' => $status,
+                        'module' => (string)$details['module'],
+                        'details' => $details,
+                        'actor_name' => trim((string)($_SESSION['user_name'] ?? $_SESSION['user_email'] ?? 'Unknown')),
+                        'actor_email' => trim((string)($_SESSION['user_email'] ?? '')),
+                        'actor_role' => strtolower(trim((string)($_SESSION['user_role'] ?? 'guest'))),
+                    ];
+                    $stmt = $pdo->prepare(
+                        'INSERT INTO activity_logs
+                            (user_id, action, description, ip_address, created_at)
+                         VALUES
+                            (:user_id, :action, :description, :ip_address, :created_at)'
+                    );
+                    $stmt->bindValue(':user_id', $actorIdInt, $actorIdInt === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
+                    $stmt->bindValue(':action', $action, PDO::PARAM_STR);
+                    $stmt->bindValue(':description', json_encode($legacyPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), PDO::PARAM_STR);
+                    $stmt->bindValue(':ip_address', trim((string)($_SERVER['REMOTE_ADDR'] ?? '')), PDO::PARAM_STR);
+                    $stmt->bindValue(':created_at', dbNowUtcString(), PDO::PARAM_STR);
+                    $stmt->execute();
+                }
+            } catch (Exception $e) {
+                // Swallow logging errors so normal requests are unaffected.
+            }
+        });
+    }
+}
+
+dbAutoActivityRegister();
