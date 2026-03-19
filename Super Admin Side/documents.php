@@ -843,6 +843,7 @@ try {
             'stamp_width_pct'  => 18,
             'stamp_x_pct'      => 82,
             'stamp_y_pct'      => 84,
+            'details'          => $d['details'] ?? '',
         ];
     }
     try {
@@ -914,6 +915,14 @@ $selectedExt = strtolower((string)pathinfo($selectedFileName, PATHINFO_EXTENSION
 $isSelectedImage = in_array($selectedExt, ['jpg', 'jpeg', 'png', 'gif', 'webp'], true);
 $isSelectedPdf = ($selectedExt === 'pdf');
 $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
+
+$receivedStampMeta = null;
+if ($selectedDocument && !empty($selectedDocument['details'])) {
+    $parsed = @json_decode((string)$selectedDocument['details'], true);
+    if (is_array($parsed) && !empty($parsed['received_stamp'])) {
+        $receivedStampMeta = $parsed['received_stamp'];
+    }
+}
 
 $progressEvents = [];
 $currentHolderLabel = 'No holder yet';
@@ -1159,6 +1168,7 @@ if ($isViewMode) {
             border: 1px solid #dbe3ef;
         }
         #detail-docx-container .docx-wrapper > section.docx:last-child { margin-bottom: 0; }
+        .fd-stamp-overlay { position: absolute; z-index: 20; object-fit: contain; max-width: none; max-height: none; pointer-events: none; opacity: 0.92; transform: translate(-50%, -50%); }
 
         /* ── COMMENTS PANEL (right side) ──────────────── */
         .detail-right {
@@ -1856,6 +1866,7 @@ if ($isViewMode) {
     (function() {
         var container = document.getElementById('detail-docx-container');
         var pageCountLabel = document.getElementById('detail-page-count');
+        var stampMeta = <?php echo $receivedStampMeta ? json_encode($receivedStampMeta, JSON_UNESCAPED_SLASHES) : 'null'; ?>;
         if (!container) return;
         function updatePageCount() {
             if (!pageCountLabel) return;
@@ -1864,11 +1875,45 @@ if ($isViewMode) {
             var total = pageNodes ? pageNodes.length : 0;
             pageCountLabel.textContent = 'Pages: ' + (total > 0 ? total : 1);
         }
+        function hideEmbeddedStamp(el) {
+            var imgs = el.querySelectorAll('img');
+            for (var i = 0; i < imgs.length; i++) {
+                var alt = (imgs[i].alt || '').toLowerCase();
+                var title = (imgs[i].title || '').toLowerCase();
+                if (alt.indexOf('fdreceivedstamp') !== -1 || title.indexOf('fdreceivedstamp') !== -1) {
+                    var wrapper = imgs[i].closest('span, div') || imgs[i].parentNode;
+                    if (wrapper && wrapper !== el) { wrapper.style.display = 'none'; } else { imgs[i].style.display = 'none'; }
+                    return;
+                }
+            }
+        }
+        function applyReceivedStampOverlay(el, meta) {
+            if (!meta || !meta.image) return;
+            var pages = el.querySelectorAll('.docx-wrapper > section.docx, .docx-wrapper > section, .docx > section');
+            if (!pages.length) { var fb = el.querySelector('.docx-wrapper') || el.querySelector('.docx') || el.firstElementChild; if (fb) pages = [fb]; }
+            if (!pages.length) return;
+            var pageIdx = Math.max(0, (parseInt(meta.page, 10) || 1) - 1);
+            var targetPage = pages[pageIdx] || pages[0];
+            if (!targetPage) return;
+            if (!targetPage.style.position || targetPage.style.position === 'static') targetPage.style.position = 'relative';
+            hideEmbeddedStamp(el);
+            var overlay = document.createElement('img');
+            overlay.className = 'fd-stamp-overlay';
+            overlay.src = meta.image;
+            overlay.alt = 'Receiving stamp';
+            overlay.style.width = Math.max(5, Math.min(60, parseFloat(meta.width) || 18)) + '%';
+            overlay.style.left = Math.max(1, Math.min(99, parseFloat(meta.x) || 14)) + '%';
+            overlay.style.top = Math.max(1, Math.min(99, parseFloat(meta.y) || 14)) + '%';
+            targetPage.appendChild(overlay);
+        }
         fetch('documents.php?view=<?php echo urlencode($selectedDocumentId); ?>')
             .then(function(r) { if (!r.ok) throw new Error(); return r.blob(); })
             .then(function(blob) {
                 if (typeof docx !== 'undefined' && docx.renderAsync) {
-                    docx.renderAsync(blob, container, null, { breakPages: true, ignoreLastRenderedPageBreak: false }).then(function() { updatePageCount(); });
+                    docx.renderAsync(blob, container, null, { breakPages: true, ignoreLastRenderedPageBreak: false }).then(function() {
+                        updatePageCount();
+                        applyReceivedStampOverlay(container, stampMeta);
+                    });
                 }
             })
             .catch(function() {
@@ -2870,7 +2915,6 @@ if ($isViewMode) {
             stamp.className = 'document-stamp-overlay';
             stamp.src = stampCfg.image;
             stamp.alt = 'Document stamp';
-            // Render exactly what Front Desk saved; do not auto-adjust on view.
             var width = parseFloat(stampCfg.width);
             var x = parseFloat(stampCfg.x);
             var y = parseFloat(stampCfg.y);
@@ -2883,7 +2927,35 @@ if ($isViewMode) {
             targetEl.appendChild(stamp);
         }
 
-        function openDocumentViewModal(docId, docName, stampCfg) {
+        function applyModalReceivedStampOverlay(el, meta) {
+            if (!meta || !meta.image) return;
+            var pages = el.querySelectorAll('.docx-wrapper > section.docx, .docx-wrapper > section, .docx > section');
+            if (!pages.length) { var fb = el.querySelector('.docx-wrapper') || el.querySelector('.docx') || el.firstElementChild; if (fb) pages = [fb]; }
+            if (!pages.length) return;
+            var pageIdx = Math.max(0, (parseInt(meta.page, 10) || 1) - 1);
+            var targetPage = pages[pageIdx] || pages[0];
+            if (!targetPage) return;
+            if (!targetPage.style.position || targetPage.style.position === 'static') targetPage.style.position = 'relative';
+            var imgs = el.querySelectorAll('img');
+            for (var i = 0; i < imgs.length; i++) {
+                var alt = (imgs[i].alt || '').toLowerCase();
+                if (alt.indexOf('fdreceivedstamp') !== -1) {
+                    var wrapper = imgs[i].closest('span, div') || imgs[i].parentNode;
+                    if (wrapper && wrapper !== el) { wrapper.style.display = 'none'; } else { imgs[i].style.display = 'none'; }
+                    break;
+                }
+            }
+            var overlay = document.createElement('img');
+            overlay.className = 'fd-stamp-overlay';
+            overlay.src = meta.image;
+            overlay.alt = 'Receiving stamp';
+            overlay.style.width = Math.max(5, Math.min(60, parseFloat(meta.width) || 18)) + '%';
+            overlay.style.left = Math.max(1, Math.min(99, parseFloat(meta.x) || 14)) + '%';
+            overlay.style.top = Math.max(1, Math.min(99, parseFloat(meta.y) || 14)) + '%';
+            targetPage.appendChild(overlay);
+        }
+
+        function openDocumentViewModal(docId, docName, stampCfg, rcvStampMeta) {
             if (!documentViewModal || !documentViewContainer) return;
             documentViewModal.hidden = false;
             document.body.classList.add('modal-open');
@@ -2906,6 +2978,7 @@ if ($isViewMode) {
                     documentViewLoading.style.display = 'none';
                     if (typeof docx !== 'undefined' && docx.renderAsync) {
                         return docx.renderAsync(blob, documentViewContainer).then(function() {
+                            applyModalReceivedStampOverlay(documentViewContainer, rcvStampMeta);
                             applyStampOverlay(stampCfg);
                             documentViewContainer.style.display = 'block';
                             if (documentViewDownloadLink) documentViewDownloadLink.style.display = 'inline-flex';

@@ -471,6 +471,14 @@ $isSelectedPdf = ($selectedExt === 'pdf');
 $isSelectedDocx = in_array($selectedExt, ['doc', 'docx'], true);
 $superAdminNote = trim((string)($selectedDocument['notes'] ?? ''));
 
+$receivedStampMeta = null;
+if ($selectedDocument && !empty($selectedDocument['details'])) {
+    $parsed = @json_decode((string)$selectedDocument['details'], true);
+    if (is_array($parsed) && !empty($parsed['received_stamp'])) {
+        $receivedStampMeta = $parsed['received_stamp'];
+    }
+}
+
 $progressEvents = [];
 $currentHolderLabel = 'No holder yet';
 if ($isViewMode && preg_match('/^\d+$/', $selectedDocumentId)) {
@@ -717,6 +725,7 @@ if ($isViewMode && preg_match('/^\d+$/', $selectedDocumentId)) {
         #docx-container .docx-wrapper > section.docx:last-child {
             margin-bottom: 0;
         }
+        .fd-stamp-overlay { position: absolute; z-index: 20; object-fit: contain; max-width: none; max-height: none; pointer-events: none; opacity: 0.92; transform: translate(-50%, -50%); }
 
         /* ── COMMENTS PANEL (right side) ──────────────── */
         .detail-right {
@@ -1254,6 +1263,7 @@ if ($isViewMode && preg_match('/^\d+$/', $selectedDocumentId)) {
     (function() {
         var container = document.getElementById('docx-container');
         var pageCountLabel = document.getElementById('docx-page-count');
+        var stampMeta = <?php echo $receivedStampMeta ? json_encode($receivedStampMeta, JSON_UNESCAPED_SLASHES) : 'null'; ?>;
         if (!container) return;
 
         function updatePageCount() {
@@ -1266,6 +1276,51 @@ if ($isViewMode && preg_match('/^\d+$/', $selectedDocumentId)) {
             pageCountLabel.textContent = 'Pages: ' + (total > 0 ? total : 1);
         }
 
+        function hideEmbeddedStamp() {
+            var imgs = container.querySelectorAll('img');
+            for (var i = 0; i < imgs.length; i++) {
+                var alt = (imgs[i].alt || '').toLowerCase();
+                var title = (imgs[i].title || '').toLowerCase();
+                if (alt.indexOf('fdreceivedstamp') !== -1 || title.indexOf('fdreceivedstamp') !== -1) {
+                    var wrapper = imgs[i].closest('span, div') || imgs[i].parentNode;
+                    if (wrapper && wrapper !== container) {
+                        wrapper.style.display = 'none';
+                    } else {
+                        imgs[i].style.display = 'none';
+                    }
+                    return;
+                }
+            }
+        }
+
+        function applyReceivedStampOverlay() {
+            if (!stampMeta || !stampMeta.image) return;
+            var pages = container.querySelectorAll('.docx-wrapper > section.docx, .docx-wrapper > section, .docx > section');
+            if (!pages.length) {
+                var fb = container.querySelector('.docx-wrapper') || container.querySelector('.docx') || container.firstElementChild;
+                if (fb) pages = [fb];
+            }
+            if (!pages.length) return;
+            var pageIdx = Math.max(0, (parseInt(stampMeta.page, 10) || 1) - 1);
+            var targetPage = pages[pageIdx] || pages[0];
+            if (!targetPage) return;
+            if (!targetPage.style.position || targetPage.style.position === 'static') {
+                targetPage.style.position = 'relative';
+            }
+            hideEmbeddedStamp();
+            var overlay = document.createElement('img');
+            overlay.className = 'fd-stamp-overlay';
+            overlay.src = stampMeta.image;
+            overlay.alt = 'Receiving stamp';
+            var w = Math.max(5, Math.min(60, parseFloat(stampMeta.width) || 18));
+            var x = Math.max(1, Math.min(99, parseFloat(stampMeta.x) || 14));
+            var y = Math.max(1, Math.min(99, parseFloat(stampMeta.y) || 14));
+            overlay.style.width = w + '%';
+            overlay.style.left = x + '%';
+            overlay.style.top = y + '%';
+            targetPage.appendChild(overlay);
+        }
+
         fetch('department_documents.php?view=<?php echo urlencode($selectedDocumentId); ?>')
             .then(function(r) { if (!r.ok) throw new Error(); return r.blob(); })
             .then(function(blob) {
@@ -1275,6 +1330,7 @@ if ($isViewMode && preg_match('/^\d+$/', $selectedDocumentId)) {
                         ignoreLastRenderedPageBreak: false
                     }).then(function() {
                         updatePageCount();
+                        applyReceivedStampOverlay();
                     });
                 }
             })

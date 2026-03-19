@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Stamp Positioning Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; }
+        .preview-container { width: 100%; height: 400px; border: 1px solid #ddd; position: relative; background: #f9f9f9; }
+        .test-page { width: 80%; height: 300px; margin: 20px auto; border: 1px solid #bbb; background: white; position: relative; }
+        .stamp-overlay { position: absolute; transform: translate(-50%, -50%); z-index: 20; opacity: 0.9; border: 2px dashed red; padding: 10px; background: rgba(255,0,0,0.1); }
+        .coordinates { font-family: monospace; color: #666; }
+    </style>
+</head>
+<body>
+    <h1>Stamp Positioning Consistency Test</h1>
+    
+    <div class="test-section">
+        <h2>Test Results</h2>
+        <div id="test-results"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Preview Simulation (upload_documents.php logic)</h2>
+        <div class="preview-container">
+            <div class="test-page" id="preview-page">
+                <div class="stamp-overlay" id="preview-stamp">PREVIEW STAMP</div>
+            </div>
+        </div>
+        <div class="coordinates" id="preview-coords"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>View Simulation (documents.php logic)</h2>
+        <div class="preview-container">
+            <div class="test-page" id="view-page">
+                <div class="stamp-overlay" id="view-stamp">VIEW STAMP</div>
+            </div>
+        </div>
+        <div class="coordinates" id="view-coords"></div>
+    </div>
+
+    <script>
+        function testStampPositioning() {
+            // Test data - same coordinates that would be saved
+            const testData = {
+                width: 18,
+                x: 82,
+                y: 14,
+                page: 1
+            };
+
+            // Simulate preview positioning logic (upload_documents.php)
+            const previewPage = document.getElementById('preview-page');
+            const previewStamp = document.getElementById('preview-stamp');
+            
+            previewStamp.style.width = testData.width + '%';
+            previewStamp.style.left = testData.x + '%';
+            previewStamp.style.top = testData.y + '%';
+            previewStamp.style.transform = 'translate(-50%, -50%)';
+
+            // Simulate view positioning logic (documents.php) - should be identical now
+            const viewPage = document.getElementById('view-page');
+            const viewStamp = document.getElementById('view-stamp');
+            
+            viewStamp.style.width = testData.width + '%';
+            viewStamp.style.left = testData.x + '%';
+            viewStamp.style.top = testData.y + '%';
+            viewStamp.style.transform = 'translate(-50%, -50%)';
+
+            // Get actual positions for comparison
+            const previewRect = previewStamp.getBoundingClientRect();
+            const viewRect = viewStamp.getBoundingClientRect();
+            const previewPageRect = previewPage.getBoundingClientRect();
+            const viewPageRect = viewPage.getBoundingClientRect();
+
+            // Calculate relative positions
+            const previewRelX = ((previewRect.left + previewRect.width/2) - previewPageRect.left) / previewPageRect.width * 100;
+            const previewRelY = ((previewRect.top + previewRect.height/2) - previewPageRect.top) / previewPageRect.height * 100;
+            const viewRelX = ((viewRect.left + viewRect.width/2) - viewPageRect.left) / viewPageRect.width * 100;
+            const viewRelY = ((viewRect.top + viewRect.height/2) - viewPageRect.top) / viewPageRect.height * 100;
+
+            // Display coordinates
+            document.getElementById('preview-coords').innerHTML = 
+                `Width: ${testData.width}% | X: ${previewRelX.toFixed(2)}% | Y: ${previewRelY.toFixed(2)}%`;
+            
+            document.getElementById('view-coords').innerHTML = 
+                `Width: ${testData.width}% | X: ${viewRelX.toFixed(2)}% | Y: ${viewRelY.toFixed(2)}%`;
+
+            // Test results
+            const xDiff = Math.abs(previewRelX - viewRelX);
+            const yDiff = Math.abs(previewRelY - viewRelY);
+            const tolerance = 0.1; // 0.1% tolerance
+
+            const results = document.getElementById('test-results');
+            if (xDiff < tolerance && yDiff < tolerance) {
+                results.innerHTML = '<div style="color: green; font-weight: bold;">✅ PASS: Stamp positioning is consistent!</div>';
+                results.innerHTML += `<div>X difference: ${xDiff.toFixed(3)}% | Y difference: ${yDiff.toFixed(3)}%</div>`;
+            } else {
+                results.innerHTML = '<div style="color: red; font-weight: bold;">❌ FAIL: Stamp positioning differs!</div>';
+                results.innerHTML += `<div>X difference: ${xDiff.toFixed(3)}% | Y difference: ${yDiff.toFixed(3)}%</div>`;
+            }
+        }
+
+        // Run test when page loads
+        window.addEventListener('load', testStampPositioning);
+    </script>
+</body>
+</html>
